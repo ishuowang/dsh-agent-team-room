@@ -1,0 +1,13 @@
+# Agent Team Room is split into a durable host service, model-facing tools,
+# and an optional Web dashboard. The dashboard stays pending in non-Web profiles.
+- insert:
+    - id: agent-team-room
+      name: 'dsh-agent-team-room'
+      config:
+        provider: spawn
+
+    - id: agent-team-room-tools
+      name: 'dsh-agent-team-room/tools'
+
+    - id: agent-team-room-dashboard
+      name: 'dsh-agent-team-room/dashboard'

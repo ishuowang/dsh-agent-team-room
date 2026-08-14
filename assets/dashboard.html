@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#080b12" />
+    <meta
+      name="description"
+      content="A live, read-only mission control dashboard for DSH Agent Team Room."
+    />
+    <title>Agent Team Room · Mission Control</title>
+    <link rel="stylesheet" href="./dashboard.css" />
+    <script src="./dashboard.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#room-content">Skip to room details</a>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Team rooms">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <p class="eyebrow">DeepSeek Harness</p>
+            <h1>Team Room</h1>
+          </div>
+        </div>
+
+        <div class="network-strip" aria-label="Connection status">
+          <span class="signal" id="connection-signal" aria-hidden="true"></span>
+          <span id="connection-label">Connecting</span>
+          <span class="network-strip__time" id="last-sync">—</span>
+        </div>
+
+        <div class="room-tools">
+          <label for="room-filter">Rooms</label>
+          <div class="search-field">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="m16 16 4 4"></path>
+            </svg>
+            <input
+              id="room-filter"
+              type="search"
+              autocomplete="off"
+              placeholder="Filter missions…"
+              aria-controls="room-list"
+            />
+            <kbd aria-hidden="true">/</kbd>
+          </div>
+        </div>
+
+        <nav class="room-nav" aria-label="Available rooms">
+          <div id="room-list" class="room-list" role="listbox" aria-label="Rooms" aria-busy="true">
+            <div class="room-skeleton" aria-hidden="true"><span></span><span></span></div>
+            <div class="room-skeleton" aria-hidden="true"><span></span><span></span></div>
+            <div class="room-skeleton" aria-hidden="true"><span></span><span></span></div>
+          </div>
+          <p class="room-filter-empty" id="filter-empty" hidden>No matching rooms</p>
+        </nav>
+
+        <footer class="sidebar-footer">
+          <div>
+            <span class="mono-label">MODE</span>
+            <strong>READ ONLY</strong>
+          </div>
+          <div>
+            <span class="mono-label">REFRESH</span>
+            <strong>12 SEC</strong>
+          </div>
+        </footer>
+      </aside>
+
+      <main class="workspace" id="room-content" tabindex="-1">
+        <header class="topbar">
+          <div class="breadcrumb" aria-label="Current location">
+            <span>Mission control</span>
+            <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"></path></svg>
+            <strong id="breadcrumb-room">Room overview</strong>
+          </div>
+          <div class="topbar-actions">
+            <span class="demo-badge" id="demo-badge" hidden>Demo feed</span>
+            <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh room data">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M20 7v5h-5"></path>
+                <path d="M4.9 17a8 8 0 0 0 13.7-2M19.1 7A8 8 0 0 0 5.4 9M4 12V7h5"></path>
+              </svg>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="view-state" id="view-state" aria-live="polite">
+          <div class="state-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+          <p class="eyebrow" id="state-kicker">Establishing uplink</p>
+          <h2 id="state-title">Loading team rooms</h2>
+          <p id="state-copy">Reading the shared room registry and active mission state.</p>
+          <button class="primary-button" id="retry-button" type="button" hidden>Retry connection</button>
+        </section>
+
+        <div class="room-view" id="room-view" hidden>
+          <section class="mission-hero" aria-labelledby="room-title">
+            <div class="mission-hero__copy">
+              <div class="mission-meta">
+                <span class="status-pill" id="room-status"><i></i> Active</span>
+                <span id="room-updated">Updated —</span>
+              </div>
+              <h2 id="room-title">—</h2>
+              <p class="objective-label">Mission objective</p>
+              <p class="objective" id="room-objective">—</p>
+            </div>
+            <dl class="mission-stats" aria-label="Room summary">
+              <div>
+                <dt>Agents</dt>
+                <dd id="stat-agents">0</dd>
+                <span id="stat-agents-note">0 online</span>
+              </div>
+              <div>
+                <dt>Open tasks</dt>
+                <dd id="stat-tasks">0</dd>
+                <span id="stat-tasks-note">0 in progress</span>
+              </div>
+              <div>
+                <dt>Events</dt>
+                <dd id="stat-events">0</dd>
+                <span>shared context</span>
+              </div>
+            </dl>
+          </section>
+
+          <section class="dashboard-section" aria-labelledby="agents-heading">
+            <div class="section-heading">
+              <div>
+                <p class="section-index">01 / Crew manifest</p>
+                <h3 id="agents-heading">Agents in this room</h3>
+              </div>
+              <span class="section-count" id="agent-count">0 agents</span>
+            </div>
+            <div class="member-grid" id="member-grid"></div>
+          </section>
+
+          <section class="dashboard-section" aria-labelledby="tasks-heading">
+            <div class="section-heading">
+              <div>
+                <p class="section-index">02 / Workstream</p>
+                <h3 id="tasks-heading">Mission board</h3>
+              </div>
+              <span class="section-count" id="task-count">0 tasks</span>
+            </div>
+            <div class="kanban" id="kanban" aria-label="Tasks grouped by status"></div>
+          </section>
+
+          <section class="dashboard-section timeline-section" aria-labelledby="timeline-heading">
+            <div class="section-heading">
+              <div>
+                <p class="section-index">03 / Shared memory</p>
+                <h3 id="timeline-heading">Room event stream</h3>
+              </div>
+              <span class="live-label"><i aria-hidden="true"></i> Live feed</span>
+            </div>
+            <ol class="timeline" id="timeline"></ol>
+          </section>
+        </div>
+
+        <footer class="workspace-footer">
+          <span>DSH / Agent Team Room</span>
+          <span>Telemetry is read-only</span>
+        </footer>
+      </main>
+    </div>
+
+    <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
+    <noscript>
+      <div class="noscript">JavaScript is required to display live room telemetry.</div>
+    </noscript>
+  </body>
+</html>
