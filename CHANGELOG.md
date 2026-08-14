@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 - 2026-08-14
+
+- Add a native, additive `Rooms` entry to the DSH Web sidebar footer.
+- Ship the browser half as a prebuilt ModuleLoader bundle in the same plugin package.
+- Keep the standalone dashboard isolated from the conversation surface.
+
 ## 0.1.0 - 2026-08-14
 
 - Add persistent rooms with explicit leader/member ownership.

@@ -13,6 +13,10 @@ track work, and watch one shared timeline—without collapsing every agent into 
 
 ![Agent Team Room dashboard](assets/dashboard.png)
 
+<p align="center"><sub>A small native <strong>Rooms</strong> entry opens the board without replacing DSH Web.</sub></p>
+
+![Native DSH sidebar with the Rooms entry](assets/native-sidebar.png)
+
 ## Why a room?
 
 Subagents are excellent at delegation, but a team also needs a place to coordinate. Agent Team Room adds that missing layer:
@@ -47,13 +51,15 @@ Requirements: Node.js `^22.19.0 || >=24`, DeepSeek Harness `0.1.0-rc.6`.
 
 ```sh
 # Pin the release for reproducible installs.
-dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.1.0
+dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.2.0
 
 # Start the same Web profile.
 dsh web
 ```
 
 Open [http://127.0.0.1:3080/agent-team-room/](http://127.0.0.1:3080/agent-team-room/). The board is read-only by design; room actions go through the Agent's permission-aware tools.
+
+On DSH Web, the same package also adds a small **Rooms** action to the native sidebar footer. It uses DSH's additive `sidebar.footer.action` slot and opens the same-origin `/agent-team-room/` board in a new tab, so the current conversation and all native controls stay mounted. It does not replace or patch the root, sidebar, or conversation UI.
 
 To try the visual demo without creating a room, append `?demo=1`.
 
@@ -110,6 +116,8 @@ The dashboard route can also be moved:
     allowRemote: false
 ```
 
+The native sidebar action intentionally targets the default `/agent-team-room/` path. If `routePrefix` is changed, open or bookmark the configured dashboard URL directly.
+
 ## Design boundaries
 
 - New members are direct, continuable children of the Leader. This preserves DSH's parent→child authorization instead of creating an ungoverned peer channel.
@@ -128,7 +136,7 @@ npm run check
 npm pack --dry-run
 ```
 
-The repository commits `lib/` intentionally. A GitHub install therefore receives prebuilt JavaScript and does not need permission to run a dependency `prepare` script.
+The repository commits `lib/` intentionally, including the ModuleLoader-compatible `lib/client.js` browser bundle. A GitHub install therefore receives prebuilt JavaScript and does not need permission to run a dependency `prepare` script.
 
 Development branches use the `feature/` prefix; see [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
