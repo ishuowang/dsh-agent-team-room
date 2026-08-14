@@ -12,6 +12,10 @@
 
 ![Agent Team Room 看板](assets/dashboard.png)
 
+<p align="center"><sub>原生侧边栏只增加一个轻量 <strong>Rooms</strong> 入口，不替换 DSH Web。</sub></p>
+
+![带有 Rooms 入口的 DSH 原生侧边栏](assets/native-sidebar.png)
+
 ## 为什么需要 Room？
 
 Subagent 解决了“把工作委派出去”，Room 则补齐“团队如何持续协作”：
@@ -46,13 +50,15 @@ Leader 始终是协调者和权限边界。Agent 只共享必要的 Room 事件�
 
 ```sh
 # 固定 Release，获得可复现安装。
-dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.1.0
+dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.2.0
 
 # 启动同一个 Web profile。
 dsh web
 ```
 
 打开 [http://127.0.0.1:3080/agent-team-room/](http://127.0.0.1:3080/agent-team-room/)。看板有意保持只读；实际操作仍通过具备 DSH 权限上下文的 Agent 工具完成。
+
+在 DSH Web 中，同一个包还会通过官方 additive `sidebar.footer.action` 插槽，在原生侧边栏底部增加一个小型 **Rooms** 入口。它会在新标签页打开同源 `/agent-team-room/` 看板，当前会话及全部原生控件会继续保留；插件不会替换或修改 root、sidebar、conversation UI。
 
 还没有创建房间时，可以访问 `?demo=1` 查看视觉演示。
 
@@ -108,6 +114,8 @@ Agent 会自行发现并调用 Room 工具。
     allowRemote: false
 ```
 
+原生侧边栏入口固定指向默认 `/agent-team-room/` 路径。如果修改了 `routePrefix`，请直接打开或收藏自定义的看板地址。
+
 ## 设计边界
 
 - 新成员是 Leader 的直属 continuable child，遵循 DSH 的父→子授权规则，不创建无约束的任意 peer 通道。
@@ -126,7 +134,7 @@ npm run check
 npm pack --dry-run
 ```
 
-仓库有意提交预构建的 `lib/`。从 GitHub 安装时无需授权依赖执行 `prepare` 脚本。
+仓库有意提交预构建的 `lib/`，其中包括兼容 ModuleLoader 的浏览器包 `lib/client.js`。从 GitHub 安装时无需授权依赖执行 `prepare` 脚本。
 
 开发分支统一使用 `feature/` 前缀，详见 [AGENTS.md](AGENTS.md) 与 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
