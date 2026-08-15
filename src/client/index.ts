@@ -2,13 +2,26 @@
 
 import { createElement, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext, ISessions } from '@deepseek-ai/dsh-client-runtime/client'
+import type { CommandUiContract, SelectOption } from '@deepseek-ai/dsh-client-ui-commands/client'
+import type { ClientSessionContext } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { IconUserOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
 export const ROOM_DASHBOARD_PATH = '/agent-team-room/'
 export const ROOM_FOOTER_ENTRY_ID = 'dsh-agent-team-room'
+
+/** Client-safe presentation copy; ids are parity-tested against the host registry. */
+export const ROOM_TEMPLATE_OPTIONS = Object.freeze([
+  { id: 'opc', label: 'One-Person Company', detail: 'Chief of Staff, finance, legal, operations, R&D, growth, and customer success', agentCount: 7 },
+  { id: 'deep-research', label: 'Deep Research', detail: 'Parallel evidence gathering, source criticism, and cited synthesis', agentCount: 6 },
+  { id: 'software-delivery', label: 'Software Delivery', detail: 'Plan, explore, implement, test, review, and ship', agentCount: 6 },
+  { id: 'incident-response', label: 'Incident Response', detail: 'Triage, mitigate, investigate, communicate, and verify recovery', agentCount: 5 },
+  { id: 'customer-support', label: 'Customer Support', detail: 'Triage and hand off account, billing, technical, and policy cases', agentCount: 5 },
+  { id: 'content-campaign', label: 'Content Campaign', detail: 'Research, strategy, channel copy, editing, and distribution', agentCount: 6 },
+  { id: 'plan-execute-review', label: 'Plan · Execute · Review', detail: 'A reusable planner, parallel workers, critic, and synthesizer loop', agentCount: 5 },
+] as const)
 
 export type RoomsFooterActionProps =
   PropsRuntime<'sidebar.footer.action'> & SidebarFooterActionOwnerProps
@@ -77,8 +90,24 @@ export function RoomsFooterAction({ wide }: RoomsFooterActionProps): ReactElemen
   })
 }
 
-/** Required client service: the typed slot registry. */
-export const inject = ['slots']
+function templateOptions(): SelectOption[] {
+  return ROOM_TEMPLATE_OPTIONS.map(option => ({
+    id: option.id,
+    label: option.label,
+    detail: option.detail,
+    confirmation: {
+      title: `Create ${option.label} room?`,
+      description:
+        `This template immediately starts ${option.agentCount} independent Agent Sessions and can consume model quota.`,
+      acknowledgeLabel: 'I understand that multiple Agents will start',
+      cancelLabel: 'Cancel',
+      confirmLabel: 'Create room',
+    },
+  }))
+}
+
+/** Required native services: additive slots and the official command popup surface. */
+export const inject = ['slots', 'commandUi', 'sessions']
 
 /** Register only into the sidebar's additive footer-action seat. */
 export function apply(ctx: ClientContext): void {
@@ -87,4 +116,25 @@ export function apply(ctx: ClientContext): void {
     id: ROOM_FOOTER_ENTRY_ID,
     order: 20,
   }, RoomsFooterAction))
+
+  const command = ctx.get('commandUi') as CommandUiContract
+  // Host and Client builds both merge Cordis Context in this package; resolve
+  // the browser sessions face explicitly so the two compile-time faces stay isolated.
+  const sessions = ctx.get('sessions') as unknown as ISessions
+  const sessionFor = (session: ClientSessionContext) => sessions.binding(session.sessionId)?.session
+  ctx.effect(() => command.decorate({
+    name: 'room-template',
+    available: session => sessionFor(session) !== undefined,
+    ui: {
+      kind: 'popupSelect',
+      options: () => Promise.resolve(templateOptions()),
+      onSelect: async (option, session) => {
+        const live = sessionFor(session)
+        if (live === undefined) throw new Error('this session is not materialized yet')
+        const result = await live.command(`/room-template create ${option.id}`)
+        if (!result.ok) throw new Error(`room template command failed: ${result.error.code}: ${result.error.message}`)
+        if (!result.value.matched) throw new Error('the host offers no /room-template command')
+      },
+    },
+  }), 'agent-team-room: /room-template native picker')
 }

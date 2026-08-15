@@ -28,6 +28,7 @@ class FakeSubagents extends Service {
   readonly interrupts: Array<{ childId: string; authority: SubagentInterruptAuthority }> = []
   children: SubagentListEntry[] = []
   nextChild = 1
+  failStartAt: number | undefined
   failFollowup: Error | undefined
 
   constructor(ctx: Context) {
@@ -36,6 +37,7 @@ class FakeSubagents extends Service {
 
   async startContinuable(spec: ContinuableStartSpec): Promise<{ childId: SessionId; messageId: MessageId }> {
     this.starts.push(spec)
+    if (this.failStartAt === this.starts.length) throw new Error('spawn unavailable')
     const childId = SessionId(`child-${this.nextChild++}`)
     return { childId, messageId: `initial-${childId}` as MessageId }
   }
@@ -189,6 +191,90 @@ describe('RoomRuntime ownership and membership', () => {
       name: 'Mallory',
       role: 'Intruder',
     }, new AbortController().signal)).rejects.toThrow('not a continuable direct child')
+  })
+})
+
+describe('RoomRuntime scenario templates', () => {
+  it('expands a built-in template into an ordinary room of independent child Sessions', async () => {
+    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 16 })
+    const owner = leader()
+    const template = runtime.getRoomTemplate('software-delivery')
+
+    const created = await runtime.createRoomFromTemplate(owner, {
+      templateId: template.id,
+      name: 'Release train',
+      objective: 'Ship the next release safely',
+      modelProvider: 'test-llm',
+      model: 'test-model',
+    }, new AbortController().signal)
+
+    expect(created.failures).toEqual([])
+    expect(created.members).toHaveLength(template.roles.length)
+    expect(created.room).toMatchObject({
+      name: 'Release train',
+      objective: 'Ship the next release safely',
+      status: 'open',
+      template: { id: template.id, name: template.name, version: template.version },
+    })
+    expect(subagents.starts).toHaveLength(template.roles.length)
+    expect(subagents.starts.every(start =>
+      start.request.agentOptions?.provider === 'test-llm'
+      && start.request.agentOptions.model === 'test-model')).toBe(true)
+    expect(created.room.members.filter(member => member.kind === 'agent').map(member => member.name))
+      .toEqual(template.roles.map(role => role.name))
+  })
+
+  it('checks template capacity before creating a room or starting a child', async () => {
+    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 4 })
+    const owner = leader()
+
+    await expect(runtime.createRoomFromTemplate(owner, {
+      templateId: 'opc',
+    }, new AbortController().signal)).rejects.toThrow('maxMembersPerRoom is 4')
+
+    expect(runtime.listRooms(owner, true)).toEqual([])
+    expect(subagents.starts).toEqual([])
+  })
+
+  it('closes and retains a traceable partial room when a later member cannot start', async () => {
+    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 16 })
+    const owner = leader()
+    subagents.failStartAt = 2
+
+    const result = await runtime.createRoomFromTemplate(owner, {
+      templateId: 'plan-execute-review',
+    }, new AbortController().signal)
+
+    expect(result.members).toHaveLength(1)
+    expect(result.failures).toEqual([
+      expect.objectContaining({ error: 'spawn unavailable' }),
+    ])
+    expect(result.room).toMatchObject({
+      status: 'closed',
+      summary: expect.stringContaining('spawn unavailable'),
+    })
+    expect(runtime.listRooms(owner)).toEqual([])
+    expect(runtime.listRooms(owner, true)).toEqual([
+      expect.objectContaining({
+        id: result.room.id,
+        status: 'closed',
+        template: expect.objectContaining({ id: 'plan-execute-review' }),
+      }),
+    ])
+    expect(subagents.interrupts).toHaveLength(1)
+  })
+
+  it('honors cancellation before writing any template state', async () => {
+    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 16 })
+    const owner = leader()
+    const controller = new AbortController()
+    controller.abort(new Error('cancelled by user'))
+
+    await expect(runtime.createRoomFromTemplate(owner, {
+      templateId: 'deep-research',
+    }, controller.signal)).rejects.toThrow('cancelled by user')
+    expect(runtime.listRooms(owner, true)).toEqual([])
+    expect(subagents.starts).toEqual([])
   })
 })
 

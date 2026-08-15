@@ -10,21 +10,41 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 import {
   ROOM_DASHBOARD_PATH,
   ROOM_FOOTER_ENTRY_ID,
+  ROOM_TEMPLATE_OPTIONS,
   RoomsFooterAction,
   apply,
   inject,
 } from '../src/client/index.js'
+import { listRoomTemplates } from '../src/templates.js'
+
+function clientHarness() {
+  const register = vi.fn(() => () => undefined)
+  const injectSlot = vi.fn((_name: string, callback: () => unknown) => callback())
+  const decorate = vi.fn((_contribution: unknown) => () => undefined)
+  const command = vi.fn(async () => ({ ok: true, value: { matched: true } }))
+  const session = { command }
+  const sessions = { binding: vi.fn((id: string) => id === 'leader-1' ? { session } : undefined) }
+  const context = {
+    slots: { inject: injectSlot, register },
+    get: vi.fn((name: string) => {
+      if (name === 'commandUi') return { decorate }
+      if (name === 'sessions') return sessions
+      throw new Error(`unexpected service: ${name}`)
+    }),
+    effect: vi.fn((callback: () => unknown) => callback()),
+  }
+  return { context, register, injectSlot, decorate, command }
+}
 
 describe('native DSH Web entry', () => {
-  it('declares only the slot registry as a runtime service', () => {
-    expect(inject).toEqual(['slots'])
+  it('declares only official native UI services', () => {
+    expect(inject).toEqual(['slots', 'commandUi', 'sessions'])
   })
 
   it('registers a uniquely identified additive sidebar footer action', () => {
-    const register = vi.fn(() => () => undefined)
-    const injectSlot = vi.fn((_name: string, callback: () => unknown) => callback())
+    const { context, register, injectSlot } = clientHarness()
 
-    apply({ slots: { inject: injectSlot, register } } as never)
+    apply(context as never)
 
     expect(injectSlot).toHaveBeenCalledTimes(1)
     expect(injectSlot).toHaveBeenCalledWith('sidebar.footer.action', expect.any(Function))
@@ -33,6 +53,54 @@ describe('native DSH Web entry', () => {
       id: ROOM_FOOTER_ENTRY_ID,
       order: 20,
     }, RoomsFooterAction)
+  })
+
+  it('decorates the host command with a native confirmed template picker', async () => {
+    const { context, decorate, command } = clientHarness()
+    apply(context as never)
+
+    expect(decorate).toHaveBeenCalledTimes(1)
+    const contribution = decorate.mock.calls[0]?.[0] as {
+      name: string
+      available(session: { sessionId: string }): boolean
+      ui: {
+        kind: string
+        options(session: { sessionId: string }, signal: AbortSignal): Promise<Array<{
+          id: string
+          label: string
+          confirmation?: { acknowledgeLabel: string; confirmLabel: string }
+        }>>
+        onSelect(option: { id: string; label: string }, session: { sessionId: string }): Promise<void>
+      }
+    } | undefined
+    expect(contribution).toBeDefined()
+    if (!contribution) throw new Error('room-template decoration was not registered')
+    expect(contribution).toMatchObject({ name: 'room-template', ui: { kind: 'popupSelect' } })
+    expect(contribution.available({ sessionId: 'leader-1' })).toBe(true)
+    expect(contribution.available({ sessionId: 'not-materialized' })).toBe(false)
+
+    const options = await contribution.ui.options({ sessionId: 'leader-1' }, new AbortController().signal)
+    expect(options).toHaveLength(ROOM_TEMPLATE_OPTIONS.length)
+    expect(options[0]).toMatchObject({
+      id: 'opc',
+      label: 'One-Person Company',
+      confirmation: {
+        acknowledgeLabel: expect.stringContaining('multiple Agents'),
+        confirmLabel: 'Create room',
+      },
+    })
+
+    const first = options[0]
+    if (!first) throw new Error('room-template picker returned no options')
+    await contribution.ui.onSelect(first, { sessionId: 'leader-1' })
+    expect(command).toHaveBeenCalledExactlyOnceWith('/room-template create opc')
+    await expect(contribution.ui.onSelect(first, { sessionId: 'not-materialized' }))
+      .rejects.toThrow('not materialized')
+  })
+
+  it('keeps the client presentation ids and counts aligned with the host template registry', () => {
+    expect(ROOM_TEMPLATE_OPTIONS.map(option => ({ id: option.id, count: option.agentCount })))
+      .toEqual(listRoomTemplates().map(template => ({ id: template.id, count: template.roles.length })))
   })
 
   it('keeps the dashboard link same-origin and rooted at the default route', () => {
@@ -73,6 +141,6 @@ describe('native DSH Web entry', () => {
     runInNewContext(source, { window })
 
     expect(id).toBe('dsh-agent-team-room')
-    expect(client).toMatchObject({ inject: ['slots'], apply: expect.any(Function) })
+    expect(client).toMatchObject({ inject: ['slots', 'commandUi', 'sessions'], apply: expect.any(Function) })
   })
 })

@@ -59,6 +59,13 @@ export interface RoomEvent {
   message: string
 }
 
+/** Optional provenance for a room expanded from a built-in scenario template. */
+export interface RoomTemplateRef {
+  id: string
+  name: string
+  version: number
+}
+
 export interface Room {
   schemaVersion: typeof ROOM_SCHEMA_VERSION
   id: string
@@ -71,6 +78,7 @@ export interface Room {
   updatedAt: string
   closedAt?: string
   summary?: string
+  template?: RoomTemplateRef
   members: RoomMember[]
   tasks: RoomTask[]
   events: RoomEvent[]
@@ -85,6 +93,7 @@ export interface RoomSummary {
   memberCount: number
   activeMemberCount: number
   openTaskCount: number
+  template?: RoomTemplateRef
   createdAt: string
   updatedAt: string
 }
@@ -130,6 +139,7 @@ export function roomSummary(room: Room): RoomSummary {
     memberCount: room.members.filter(member => member.status !== 'removed').length,
     activeMemberCount: room.members.filter(member => member.status === 'starting' || member.status === 'working').length,
     openTaskCount: room.tasks.filter(task => !isTerminalTask(task.status)).length,
+    ...(room.template ? { template: structuredClone(room.template) } : {}),
     createdAt: room.createdAt,
     updatedAt: room.updatedAt,
   }
