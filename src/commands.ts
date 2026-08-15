@@ -1,77 +1,62 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
-import type { RoomTemplate, RoomTemplateCreationResult } from './templates.js'
 import type {} from './index.js'
 
 export const name = 'agent-team-room-commands'
 export const inject = ['commands', 'rooms']
 
-const CREATE_FLAGS = {
-  '--name': 'name',
-  '--objective': 'objective',
-  '--provider': 'provider',
-  '--model-provider': 'modelProvider',
-  '--model': 'model',
-} as const
-
-type CreateFlag = keyof typeof CREATE_FLAGS
-type CreateOption = (typeof CREATE_FLAGS)[CreateFlag]
-
-export type ParsedRoomTemplateCommand =
-  | { readonly action: 'list' }
-  | { readonly action: 'show'; readonly templateId: string }
-  | {
-    readonly action: 'create'
-    readonly templateId: string
-    readonly name?: string
-    readonly objective?: string
-    readonly provider?: string
-    readonly modelProvider?: string
-    readonly model?: string
-  }
+export type ParsedRoomCommand =
+  | { action: 'list'; includeClosed: boolean }
+  | { action: 'show'; roomId: string }
+  | { action: 'create'; name: string; topic?: string }
+  | { action: 'attach'; roomId: string; sessionId: string; name?: string }
+  | { action: 'remove'; roomId: string; memberId: string; interrupt: boolean }
+  | { action: 'send'; roomId: string; memberId: string; message: string }
+  | { action: 'broadcast'; roomId: string; message: string }
+  | { action: 'close'; roomId: string; summary?: string; interrupt: boolean }
 
 const USAGE = [
-  '/room-template [list]',
-  '/room-template show <id>',
-  '/room-template create <id> [--name "..."] [--objective "..."]',
-  '  [--provider <id>] [--model-provider <id>] [--model <id>]',
+  '/room list [--include-closed true|false]',
+  '/room show <room-id>',
+  '/room create --name "..." [--topic "..."]',
+  '/room attach <room-id> --session <session-id> [--name "..."]',
+  '/room remove <room-id> <member-id> [--interrupt true|false]',
+  '/room send <room-id> <member-id> --message "..."',
+  '/room broadcast <room-id> --message "..."',
+  '/room close <room-id> [--summary "..."] [--interrupt true|false]',
 ].join('\n')
 
-/** Tokenize command input without invoking a shell or accepting implicit expansion. */
-function tokenize(rawInput: string): string[] {
+/** Tokenize command input without invoking a shell or accepting expansion. */
+export function tokenizeRoomCommand(rawInput: string): string[] {
   const tokens: string[] = []
   let token = ''
-  let tokenStarted = false
+  let started = false
   let quote: '"' | "'" | undefined
-
   const finish = (): void => {
-    if (!tokenStarted) return
+    if (!started) return
     tokens.push(token)
     token = ''
-    tokenStarted = false
+    started = false
   }
-
   for (let index = 0; index < rawInput.length; index += 1) {
     const character = rawInput[index]
-    /* v8 ignore next -- an indexed character inside the loop is always present */
     if (character === undefined) continue
-
     if (quote === undefined && /\s/u.test(character)) {
       finish()
       continue
     }
     if (character === '\\') {
       const escaped = rawInput[index + 1]
-      if (escaped === undefined) throw new Error('room-template: dangling escape at end of input')
-      tokenStarted = true
+      if (escaped === undefined) throw new Error('room: dangling escape at end of input')
       token += escaped
+      started = true
       index += 1
       continue
     }
     if (character === '"' || character === "'") {
       if (quote === undefined) {
         quote = character
-        tokenStarted = true
+        started = true
         continue
       }
       if (quote === character) {
@@ -79,155 +64,175 @@ function tokenize(rawInput: string): string[] {
         continue
       }
     }
-    tokenStarted = true
     token += character
+    started = true
   }
-
-  if (quote !== undefined) throw new Error(`room-template: unterminated ${quote} quote`)
+  if (quote !== undefined) throw new Error(`room: unterminated ${quote} quote`)
   finish()
   return tokens
 }
 
-function requireNonEmpty(value: string, field: string): string {
-  if (value.trim().length === 0) throw new Error(`room-template: ${field} cannot be empty`)
+function nonEmpty(value: string | undefined, field: string): string {
+  if (value === undefined || value.trim().length === 0) throw new Error(`room: ${field} is required\n${USAGE}`)
   return value
 }
 
-/** Parse the exact input following `/room-template`. Throws a user-facing syntax error. */
-export function parseRoomTemplateCommand(rawInput: string): ParsedRoomTemplateCommand {
-  const tokens = tokenize(rawInput)
-  const action = tokens[0]
-  if (action === undefined || action === 'list') {
-    if (tokens.length > 1) throw new Error(`room-template: list accepts no arguments\n${USAGE}`)
-    return { action: 'list' }
-  }
+function boolean(value: string | undefined, field: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback
+  if (value === 'true') return true
+  if (value === 'false') return false
+  throw new Error(`room: ${field} must be true or false\n${USAGE}`)
+}
 
-  if (action === 'show') {
-    const templateId = tokens[1]
-    if (templateId === undefined) throw new Error(`room-template: show requires a template id\n${USAGE}`)
-    if (tokens.length > 2) throw new Error(`room-template: show accepts exactly one template id\n${USAGE}`)
-    return { action: 'show', templateId: requireNonEmpty(templateId, 'template id') }
-  }
-
-  if (action !== 'create') {
-    throw new Error(`room-template: unknown action "${action}"; expected list, show, or create\n${USAGE}`)
-  }
-
-  const templateId = tokens[1]
-  if (templateId === undefined || templateId.startsWith('--')) {
-    throw new Error(`room-template: create requires a template id before any flags\n${USAGE}`)
-  }
-
-  const values: Partial<Record<CreateOption, string>> = {}
-  const seen = new Set<CreateFlag>()
-  for (let index = 2; index < tokens.length; index += 2) {
+function flags(tokens: readonly string[], start: number, allowed: readonly string[]): Map<string, string> {
+  const result = new Map<string, string>()
+  for (let index = start; index < tokens.length; index += 2) {
     const flag = tokens[index]
-    if (flag === undefined) break
-    if (!Object.hasOwn(CREATE_FLAGS, flag)) {
-      if (flag.startsWith('--')) throw new Error(`room-template: unknown flag "${flag}"\n${USAGE}`)
-      throw new Error(`room-template: unexpected positional argument "${flag}"\n${USAGE}`)
-    }
-    const typedFlag = flag as CreateFlag
-    if (seen.has(typedFlag)) throw new Error(`room-template: duplicate flag "${typedFlag}"`)
     const value = tokens[index + 1]
-    if (value === undefined || value.startsWith('--')) {
-      throw new Error(`room-template: flag "${typedFlag}" requires a value`)
+    if (flag === undefined || !flag.startsWith('--')) {
+      throw new Error(`room: unexpected positional argument "${flag ?? ''}"\n${USAGE}`)
     }
-    seen.add(typedFlag)
-    values[CREATE_FLAGS[typedFlag]] = requireNonEmpty(value, `${typedFlag} value`)
+    if (!allowed.includes(flag)) throw new Error(`room: unknown flag "${flag}"\n${USAGE}`)
+    if (result.has(flag)) throw new Error(`room: duplicate flag "${flag}"`)
+    if (value === undefined || value.startsWith('--')) throw new Error(`room: flag "${flag}" requires a value`)
+    result.set(flag, nonEmpty(value, `${flag} value`))
   }
+  return result
+}
 
-  return {
-    action: 'create',
-    templateId: requireNonEmpty(templateId, 'template id'),
-    ...values,
+export function parseRoomCommand(rawInput: string): ParsedRoomCommand {
+  const tokens = tokenizeRoomCommand(rawInput)
+  const action = tokens[0] ?? 'list'
+  if (action === 'list') {
+    const values = flags(tokens, 1, ['--include-closed'])
+    return { action, includeClosed: boolean(values.get('--include-closed'), '--include-closed', false) }
   }
-}
-
-function roleCount(template: RoomTemplate): number {
-  return template.roles.length
-}
-
-function renderTemplateList(templates: readonly RoomTemplate[]): string {
-  if (templates.length === 0) return 'No built-in Room templates are available.'
-  return [
-    'Built-in Agent Team Room templates:',
-    ...templates.map(template => (
-      `- ${template.id} — ${template.name} (${roleCount(template)} Agents)\n  ${template.description}`
-    )),
-    '',
-    'Inspect one with /room-template show <id>, or create it with /room-template create <id>.',
-  ].join('\n')
-}
-
-function renderTemplate(template: RoomTemplate): string {
-  return [
-    `${template.name} (${template.id}, v${template.version})`,
-    template.description,
-    '',
-    `Default objective: ${template.defaultObjective}`,
-    `Agents (${roleCount(template)}):`,
-    ...template.roles.map(role => `- ${role.name} — ${role.role}`),
-    '',
-    `Create with /room-template create ${template.id}`,
-  ].join('\n')
-}
-
-function renderCreated(result: RoomTemplateCreationResult): CommandResult {
-  const summary = [
-    `Room "${result.room.name}" created from ${result.template.id}.`,
-    `Room id: ${result.room.id}`,
-    `Agents started: ${result.members.length}/${result.template.roles.length}`,
-  ]
-  if (result.failures.length === 0) return { kind: 'success', text: summary.join('\n') }
-
-  summary.push(
-    `Room status: ${result.room.status}. The partial room remains available for inspection.`,
-    'Provisioning failures:',
-    ...result.failures.map(failure => `- ${failure.name} (${failure.roleId}): ${failure.error}`),
-  )
-  return { kind: 'error', text: summary.join('\n') }
+  if (action === 'show') {
+    if (tokens.length !== 2) throw new Error(`room: show requires exactly one room id\n${USAGE}`)
+    return { action, roomId: nonEmpty(tokens[1], 'room id') }
+  }
+  if (action === 'create') {
+    const values = flags(tokens, 1, ['--name', '--topic'])
+    const topic = values.get('--topic')
+    return {
+      action,
+      name: nonEmpty(values.get('--name'), '--name'),
+      ...(topic ? { topic } : {}),
+    }
+  }
+  if (action === 'attach') {
+    const roomId = nonEmpty(tokens[1], 'room id')
+    const values = flags(tokens, 2, ['--session', '--name'])
+    const name = values.get('--name')
+    return {
+      action,
+      roomId,
+      sessionId: nonEmpty(values.get('--session'), '--session'),
+      ...(name ? { name } : {}),
+    }
+  }
+  if (action === 'remove') {
+    const roomId = nonEmpty(tokens[1], 'room id')
+    const memberId = nonEmpty(tokens[2], 'member id')
+    const values = flags(tokens, 3, ['--interrupt'])
+    return { action, roomId, memberId, interrupt: boolean(values.get('--interrupt'), '--interrupt', true) }
+  }
+  if (action === 'send') {
+    const roomId = nonEmpty(tokens[1], 'room id')
+    const memberId = nonEmpty(tokens[2], 'member id')
+    const values = flags(tokens, 3, ['--message'])
+    return { action, roomId, memberId, message: nonEmpty(values.get('--message'), '--message') }
+  }
+  if (action === 'broadcast') {
+    const roomId = nonEmpty(tokens[1], 'room id')
+    const values = flags(tokens, 2, ['--message'])
+    return { action, roomId, message: nonEmpty(values.get('--message'), '--message') }
+  }
+  if (action === 'close') {
+    const roomId = nonEmpty(tokens[1], 'room id')
+    const values = flags(tokens, 2, ['--summary', '--interrupt'])
+    const summary = values.get('--summary')
+    return {
+      action,
+      roomId,
+      ...(summary ? { summary } : {}),
+      interrupt: boolean(values.get('--interrupt'), '--interrupt', true),
+    }
+  }
+  throw new Error(`room: unknown action "${action}"\n${USAGE}`)
 }
 
 function renderError(error: unknown): string {
-  if (error instanceof Error) return error.message
-  try {
-    return String(error)
-  } catch {
-    return 'room-template: an unknown error occurred'
-  }
+  return error instanceof Error ? error.message : String(error)
 }
 
-/** Register the Host-native Room template command. */
+function jsonResult(value: unknown): CommandResult {
+  return { kind: 'success', text: JSON.stringify(value, null, 2) }
+}
+
+/** Register the generic Host-native Room command used by the native UI. */
 export function apply(ctx: Context): void {
   ctx.commands.register({
-    name: 'room-template',
-    description: 'List, inspect, or create a built-in Agent Team Room scenario.',
-    input: {
-      hint: '[list | show <id> | create <id> [--name "..."] [--objective "..."]]',
-    },
+    name: 'room',
+    description: 'Create and manage rooms of attached DSH Sessions; roles come from independent member providers.',
+    input: { hint: '[list | show | create | attach | remove | send | broadcast | close]' },
     async handler(invocation) {
       try {
-        const parsed = parseRoomTemplateCommand(invocation.rawInput)
+        const parsed = parseRoomCommand(invocation.rawInput)
         invocation.signal.throwIfAborted()
-        if (parsed.action === 'list') {
-          return { kind: 'success', text: renderTemplateList(ctx.rooms.listRoomTemplates()) }
+        switch (parsed.action) {
+          case 'list':
+            return jsonResult({ rooms: ctx.rooms.listRooms(invocation.agent, parsed.includeClosed) })
+          case 'show':
+            return jsonResult({ room: ctx.rooms.getRoom(invocation.agent, parsed.roomId) })
+          case 'create':
+            return jsonResult({
+              room: await ctx.rooms.createRoom(invocation.agent, {
+                name: parsed.name,
+                ...(parsed.topic ? { topic: parsed.topic } : {}),
+              }),
+            })
+          case 'attach':
+            return jsonResult({
+              member: await ctx.rooms.attachSession(invocation.agent, parsed.roomId, {
+                sessionId: parsed.sessionId,
+                ...(parsed.name ? { name: parsed.name } : {}),
+              }, invocation.signal),
+            })
+          case 'remove':
+            return jsonResult({
+              member: await ctx.rooms.removeMember(
+                invocation.agent,
+                parsed.roomId,
+                parsed.memberId,
+                parsed.interrupt,
+              ),
+            })
+          case 'send':
+            return jsonResult(await ctx.rooms.sendMessage(
+              invocation.agent,
+              parsed.roomId,
+              parsed.memberId,
+              parsed.message,
+              invocation.signal,
+            ))
+          case 'broadcast':
+            return jsonResult({
+              deliveries: await ctx.rooms.broadcast(
+                invocation.agent,
+                parsed.roomId,
+                parsed.message,
+                invocation.signal,
+              ),
+            })
+          case 'close':
+            return jsonResult({
+              room: await ctx.rooms.closeRoom(invocation.agent, parsed.roomId, {
+                ...(parsed.summary ? { summary: parsed.summary } : {}),
+                interruptRunning: parsed.interrupt,
+              }),
+            })
         }
-        if (parsed.action === 'show') {
-          return { kind: 'success', text: renderTemplate(ctx.rooms.getRoomTemplate(parsed.templateId)) }
-        }
-        return renderCreated(await ctx.rooms.createRoomFromTemplate(
-          invocation.agent,
-          {
-            templateId: parsed.templateId,
-            ...(parsed.name !== undefined ? { name: parsed.name } : {}),
-            ...(parsed.objective !== undefined ? { objective: parsed.objective } : {}),
-            ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
-            ...(parsed.modelProvider !== undefined ? { modelProvider: parsed.modelProvider } : {}),
-            ...(parsed.model !== undefined ? { model: parsed.model } : {}),
-          },
-          invocation.signal,
-        ))
       } catch (error) {
         return { kind: 'error', text: renderError(error) }
       }

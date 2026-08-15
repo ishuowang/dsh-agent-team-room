@@ -1,34 +1,29 @@
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { SessionId, type JsonValue } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
+import type { RoomMemberProvider } from './member-provider.js'
 import { RoomStorage } from './storage.js'
 import {
-  getRoomTemplate,
-  listRoomTemplates,
-  type CreateRoomFromTemplateInput,
-  type RoomTemplate,
-  type RoomTemplateCreationResult,
-} from './templates.js'
-import {
+  DSH_SESSION_MEMBER_PROTOCOL,
+  DSH_SESSION_MEMBER_PROVIDER,
+  ROLEHUB_ROLE_API_VERSION,
   ROOM_SCHEMA_VERSION,
-  isTerminalTask,
   roomSummary,
-  type AddAgentInput,
+  type AttachRoomMemberInput,
   type BroadcastDelivery,
   type Room,
   type RoomEvent,
   type RoomEventType,
   type RoomMember,
+  type RoomMemberProfileRef,
   type RoomSummary,
-  type RoomTask,
-  type WaitResult,
 } from './types.js'
 
 export * from './types.js'
-export * from './templates.js'
+export * from './member-provider.js'
 export { RoomStorage, defaultStorageFile } from './storage.js'
 
 declare module '@deepseek-ai/cordis' {
@@ -38,35 +33,30 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export interface Config {
-  /** Continuable subagent provider used for newly created room members. */
-  provider: string
   /** JSON persistence path. Empty uses $DSH_HOME/agent-team-room/rooms.json. */
   storageFile?: string
-  /** Hard room membership ceiling, including the leader. */
+  /** Hard membership ceiling, including the leader and in-flight reservations. */
   maxMembersPerRoom: number
-  /** Maximum direct/broadcast/task instruction length. */
+  /** Maximum direct/broadcast message length. */
   maxMessageChars: number
-  /** Maximum assistant result text persisted in room state. */
-  maxResultChars: number
-  /** Maximum retained events per room. Oldest events are discarded first. */
+  /** Maximum retained metadata events per room. Oldest events are discarded first. */
   maxEventsPerRoom: number
-  /** Maximum tracked tasks retained in one room. */
-  maxTasksPerRoom: number
 }
 
 export const Config: z<Config> = z.object({
-  provider: z.string().default('spawn'),
   storageFile: z.string().default(''),
   maxMembersPerRoom: z.natural().min(2).max(128).default(16),
   maxMessageChars: z.natural().min(256).max(1_000_000).default(20_000),
-  maxResultChars: z.natural().min(256).max(1_000_000).default(40_000),
   maxEventsPerRoom: z.natural().min(100).max(100_000).default(10_000),
-  maxTasksPerRoom: z.natural().min(10).max(100_000).default(2_000),
 })
 
 interface LifecycleInfo {
   readonly id: string
   readonly stopReason?: string
+}
+
+interface DshSessionDescriptor {
+  sessionId: string
 }
 
 function now(): string {
@@ -80,19 +70,62 @@ function cleanText(value: string, field: string, maximum: number): string {
   return text
 }
 
-/** Durable room coordinator exposed as ctx.rooms. */
+function cleanOptionalText(value: string | undefined, field: string, maximum: number): string | undefined {
+  if (value === undefined || value.trim().length === 0) return undefined
+  return cleanText(value, field, maximum)
+}
+
+function jsonRecord(value: JsonValue, field: string): Record<string, JsonValue> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`agent-team-room: ${field} must be a JSON object`)
+  }
+  return value
+}
+
+function dshSessionDescriptor(value: JsonValue): DshSessionDescriptor {
+  const record = jsonRecord(value, 'dsh-session descriptor')
+  const sessionId = record['sessionId']
+  if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
+    throw new Error('agent-team-room: dsh-session descriptor requires sessionId')
+  }
+  return { sessionId: sessionId.trim() }
+}
+
+function validatedProfile(profile: RoomMemberProfileRef | undefined): RoomMemberProfileRef | undefined {
+  if (profile === undefined) return undefined
+  const apiVersion = cleanText(profile.apiVersion, 'member profile apiVersion', 120)
+  const kind = cleanText(profile.kind, 'member profile kind', 120)
+  const id = cleanText(profile.id, 'member profile id', 240)
+  const version = cleanOptionalText(profile.version, 'member profile version', 120)
+  const digest = cleanOptionalText(profile.digest, 'member profile digest', 160)
+  if (apiVersion === ROLEHUB_ROLE_API_VERSION) {
+    if (kind !== 'AgentRole' || version === undefined || digest === undefined) {
+      throw new Error('agent-team-room: RoleHub profile requires kind AgentRole, version, and digest')
+    }
+    if (!/^sha256:[a-f0-9]{64}$/u.test(digest)) {
+      throw new Error('agent-team-room: RoleHub digest must be sha256 followed by 64 lowercase hex characters')
+    }
+  }
+  return { apiVersion, kind, id, ...(version ? { version } : {}), ...(digest ? { digest } : {}) }
+}
+
+/** Thin durable Room coordinator exposed as ctx.rooms. */
 export default class RoomRuntime extends Service {
   static inject = ['subagents']
   static Config = Config
 
   private readonly storage: RoomStorage
   private readonly roomsById = new Map<string, Room>()
+  private readonly providers = new Map<string, RoomMemberProvider>()
+  private readonly reservations = new Map<string, number>()
+  private readonly busyRooms = new Set<string>()
   private readonly listeners = new Set<(roomId: string) => void>()
   private persistQueue: Promise<void> = Promise.resolve()
 
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'rooms')
     this.storage = new RoomStorage(config.storageFile)
+    this.providers.set(DSH_SESSION_MEMBER_PROVIDER, this.dshSessionProvider())
     ctx.on('subagent/start', (info: SubagentRunInfo) => this.onSubagentStart(info))
     ctx.on('subagent/end', (info: SubagentRunEndInfo) => this.onSubagentEnd(info))
   }
@@ -102,7 +135,7 @@ export default class RoomRuntime extends Service {
     for (const room of loaded) this.roomsById.set(room.id, room)
     const recovered = this.recoverInterruptedState()
     const trimmed = this.trimLoadedEvents()
-    if (recovered || trimmed) await this.persist()
+    if (recovered || trimmed || this.storage.migrated) await this.persist()
   }
 
   subscribe(listener: (roomId: string) => void): () => void {
@@ -110,136 +143,84 @@ export default class RoomRuntime extends Service {
     return () => this.listeners.delete(listener)
   }
 
-  async createRoom(parent: Agent, input: {
-    name: string
-    objective: string
-    template?: { id: string; name: string; version: number }
-  }): Promise<Room> {
+  /** Register one trusted Host-side member transport. Duplicate ids fail closed. */
+  registerMemberProvider(provider: RoomMemberProvider): () => void {
+    const id = cleanText(provider.id, 'member provider id', 120)
+    if (this.providers.has(id)) throw new Error(`agent-team-room: member provider ${id} is already registered`)
+    this.providers.set(id, provider)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      if (this.providers.get(id) === provider) this.providers.delete(id)
+    }
+  }
+
+  listMemberProviders(): string[] {
+    return [...this.providers.keys()].sort((left, right) => left.localeCompare(right, 'en'))
+  }
+
+  async createRoom(parent: Agent, input: { name: string; topic?: string }): Promise<Room> {
     const createdAt = now()
+    const leaderMemberId = randomUUID()
+    const topic = cleanOptionalText(input.topic, 'topic', this.config.maxMessageChars)
     const room: Room = {
       schemaVersion: ROOM_SCHEMA_VERSION,
       id: randomUUID(),
       name: cleanText(input.name, 'name', 120),
-      objective: cleanText(input.objective, 'objective', this.config.maxMessageChars),
-      leaderAgentId: parent.id,
+      ...(topic ? { topic } : {}),
+      leaderSessionId: parent.id,
       status: 'open',
       revision: 0,
       createdAt,
       updatedAt: createdAt,
-      ...(input.template ? { template: structuredClone(input.template) } : {}),
       members: [{
-        agentId: parent.id,
+        memberId: leaderMemberId,
         kind: 'leader',
         name: 'Leader',
-        role: 'Room coordinator',
+        connection: {
+          providerId: DSH_SESSION_MEMBER_PROVIDER,
+          protocol: DSH_SESSION_MEMBER_PROTOCOL,
+          address: { sessionId: parent.id },
+          sessionId: parent.id,
+        },
         status: 'leader',
         joinedAt: createdAt,
         updatedAt: createdAt,
       }],
-      tasks: [],
       events: [],
     }
-    this.appendEvent(room, 'room.created', `Room created: ${room.name}`, { actorAgentId: parent.id })
+    this.appendEvent(room, 'room.created', `Room created: ${room.name}`, { actorMemberId: leaderMemberId })
     this.roomsById.set(room.id, room)
-    await this.changed(room)
+    try {
+      await this.changed(room)
+    } catch (error) {
+      this.roomsById.delete(room.id)
+      throw error
+    }
     return this.copy(room)
-  }
-
-  /** Return detached built-in templates for host commands, tools, and other adapters. */
-  listRoomTemplates(): RoomTemplate[] {
-    return listRoomTemplates()
-  }
-
-  /** Resolve one detached built-in template by its stable id. */
-  getRoomTemplate(templateId: string): RoomTemplate {
-    return getRoomTemplate(templateId)
-  }
-
-  /**
-   * Expand one template into an ordinary durable room and independent child Sessions.
-   * Capacity is checked before the first write. If a later spawn fails, the traceable
-   * partial room is closed instead of pretending that already-created Sessions rolled back.
-   */
-  async createRoomFromTemplate(
-    parent: Agent,
-    input: CreateRoomFromTemplateInput,
-    signal: AbortSignal,
-  ): Promise<RoomTemplateCreationResult> {
-    signal.throwIfAborted()
-    const template = getRoomTemplate(input.templateId)
-    const requiredMembers = template.roles.length + 1
-    if (requiredMembers > this.config.maxMembersPerRoom) {
-      throw new Error(
-        `agent-team-room: template ${template.id} requires ${requiredMembers} room members, `
-        + `but maxMembersPerRoom is ${this.config.maxMembersPerRoom}`,
-      )
-    }
-
-    const room = await this.createRoom(parent, {
-      name: input.name?.trim() || template.name,
-      objective: input.objective?.trim() || template.defaultObjective,
-      template: { id: template.id, name: template.name, version: template.version },
-    })
-    const members: RoomMember[] = []
-
-    for (const role of template.roles) {
-      try {
-        signal.throwIfAborted()
-        members.push(await this.addAgent(parent, room.id, {
-          name: role.name,
-          role: role.role,
-          systemPrompt: role.systemPrompt,
-          ...(input.provider?.trim() ? { provider: input.provider.trim() } : {}),
-          ...(input.modelProvider?.trim() ? { modelProvider: input.modelProvider.trim() } : {}),
-          ...(input.model?.trim() ? { model: input.model.trim() } : {}),
-        }, signal))
-      } catch (error) {
-        const failure = {
-          roleId: role.id,
-          name: role.name,
-          error: error instanceof Error ? error.message : String(error),
-        }
-        const summary = `Template provisioning stopped at ${role.name}: ${failure.error}`
-        const closed = await this.closeRoom(parent, room.id, { summary, interruptRunning: true })
-        if (signal.aborted) signal.throwIfAborted()
-        return {
-          template,
-          room: closed,
-          members: structuredClone(members),
-          failures: [failure],
-        }
-      }
-    }
-
-    return {
-      template,
-      room: this.getRoom(parent, room.id),
-      members: structuredClone(members),
-      failures: [],
-    }
   }
 
   listRooms(parent: Agent, includeClosed = false): RoomSummary[] {
     return [...this.roomsById.values()]
-      .filter(room => room.leaderAgentId === parent.id && (includeClosed || room.status === 'open'))
+      .filter(room => room.leaderSessionId === parent.id && (includeClosed || room.status === 'open'))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .map(roomSummary)
   }
 
-  /** Dashboard-only inventory. It contains no storage path or hidden Agent transcript. */
-  listAllRooms(includeClosed = true): RoomSummary[] {
+  /** Read-only native UI projection for rooms in which one Session participates. */
+  listRoomsForSession(sessionId: string, includeClosed = true): Room[] {
     return [...this.roomsById.values()]
-      .filter(room => includeClosed || room.status === 'open')
+      .filter(room => (
+        (includeClosed || room.status === 'open')
+        && room.members.some(member => member.status !== 'removed' && member.connection.sessionId === sessionId)
+      ))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .map(roomSummary)
+      .map(room => this.copy(room))
   }
 
   getRoom(parent: Agent, roomId: string): Room {
     return this.copy(this.ownedRoom(parent, roomId))
-  }
-
-  getRoomForDashboard(roomId: string): Room {
-    return this.copy(this.room(roomId))
   }
 
   roomHistory(parent: Agent, roomId: string, limit = 100): RoomEvent[] {
@@ -248,251 +229,201 @@ export default class RoomRuntime extends Service {
     return structuredClone(room.events.slice(-count))
   }
 
-  getTask(parent: Agent, roomId: string, taskId: string): RoomTask {
-    const room = this.ownedRoom(parent, roomId)
-    const task = room.tasks.find(candidate => candidate.id === taskId)
-    if (!task) throw new Error(`agent-team-room: unknown task ${taskId}`)
-    return structuredClone(task)
-  }
-
-  async addAgent(parent: Agent, roomId: string, input: AddAgentInput, signal: AbortSignal): Promise<RoomMember> {
-    const room = this.openOwnedRoom(parent, roomId)
-    const name = cleanText(input.name, 'agent name', 120)
-    const role = cleanText(input.role, 'agent role', 240)
-    this.assertMemberCapacity(room)
-
-    let agentId = input.agentId?.trim()
-    let provider = input.provider?.trim() || this.config.provider
-    if (agentId) {
-      const children = await this.ctx.subagents.listChildren(SessionId(parent.id), signal)
-      const child = children.find(candidate => candidate.kind === 'child' && candidate.id === agentId)
-      if (!child || child.kind !== 'child' || child.mode !== 'continuable') {
-        throw new Error(`agent-team-room: ${agentId} is not a continuable direct child of this leader`)
-      }
-      provider = input.provider?.trim() || 'existing'
-    } else {
-      const options: AgentOptions = {}
-      if (input.modelProvider?.trim()) options.provider = input.modelProvider.trim()
-      if (input.model?.trim()) options.model = input.model.trim()
-      const prompt = [
-        `You joined the DSH Agent Team Room "${room.name}" as ${name}.`,
-        `Role: ${role}`,
-        `Room objective: ${room.objective}`,
-        'Work in your own Session. The leader will send room tasks as follow-up messages.',
-        'For tracked room tasks, call room_task_complete with the exact room and task ids supplied in the assignment.',
-        'Use the report tool for other material results. Do not assume you share another member\'s context.',
-      ].join('\n')
-      const started = await this.ctx.subagents.startContinuable({
-        provider,
-        label: `${room.name}: ${name}`,
-        request: {
-          prompt: [{ type: 'text', text: prompt }],
-          parent,
-          ...(Object.keys(options).length > 0 ? { agentOptions: options } : {}),
-          ...(input.systemPrompt?.trim() ? { persona: input.systemPrompt.trim() } : {}),
-        },
+  /**
+   * Prepare and commit one provider-backed member. Capacity is reserved before
+   * the provider runs, so concurrent invitations cannot orphan extra Sessions.
+   */
+  async attachMember(
+    parent: Agent,
+    roomId: string,
+    input: AttachRoomMemberInput,
+    signal: AbortSignal,
+  ): Promise<RoomMember> {
+    const providerId = cleanText(input.providerId, 'member provider id', 120)
+    const provider = this.providers.get(providerId)
+    if (!provider) throw new Error(`agent-team-room: member provider ${providerId} is unavailable`)
+    const initialRoom = this.openOwnedRoom(parent, roomId)
+    this.reserve(initialRoom)
+    let attachment: Awaited<ReturnType<RoomMemberProvider['attach']>> | undefined
+    try {
+      signal.throwIfAborted()
+      attachment = await provider.attach({
+        parent,
+        room: this.copy(initialRoom),
+        descriptor: structuredClone(input.descriptor),
+        ...(input.name?.trim() ? { requestedName: input.name.trim() } : {}),
+        ...(input.profile ? { requestedProfile: structuredClone(input.profile) } : {}),
         signal,
       })
-      agentId = started.childId
+      signal.throwIfAborted()
+      const room = this.openOwnedRoom(parent, roomId)
+      const sessionId = attachment.connection.sessionId?.trim()
+      if (sessionId && room.members.some(member => (
+        member.status !== 'removed' && member.connection.sessionId === sessionId
+      ))) {
+        throw new Error(`agent-team-room: Session ${sessionId} is already in room ${roomId}`)
+      }
+      const timestamp = now()
+      const profile = validatedProfile(attachment.profile ?? input.profile)
+      const beforeCommit = this.copy(room)
+      const member: RoomMember = {
+        memberId: randomUUID(),
+        kind: 'member',
+        name: cleanText(input.name || attachment.name, 'member name', 120),
+        connection: {
+          providerId,
+          protocol: cleanText(attachment.connection.protocol, 'member protocol', 120),
+          address: structuredClone(attachment.connection.address),
+          ...(sessionId ? { sessionId } : {}),
+        },
+        ...(profile ? { profile } : {}),
+        status: attachment.initialStatus ?? 'idle',
+        joinedAt: timestamp,
+        updatedAt: timestamp,
+      }
+      room.members.push(member)
+      this.appendEvent(room, 'member.joined', `${member.name} joined`, {
+        actorMemberId: this.leader(room).memberId,
+        targetMemberId: member.memberId,
+      })
+      try {
+        await this.changed(room)
+      } catch (error) {
+        this.roomsById.set(room.id, beforeCommit)
+        throw error
+      }
+      attachment = undefined
+      return structuredClone(member)
+    } catch (error) {
+      if (attachment?.rollback) {
+        try {
+          await attachment.rollback()
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], 'agent-team-room: member attach and rollback both failed')
+        }
+      }
+      throw error
+    } finally {
+      this.releaseReservation(roomId)
     }
+  }
 
-    const current = this.openOwnedRoom(parent, roomId)
-    this.assertMemberCapacity(current)
-    if (current.members.some(member => member.agentId === agentId && member.status !== 'removed')) {
-      throw new Error(`agent-team-room: agent ${agentId} is already in room ${roomId}`)
-    }
-    const timestamp = now()
-    const member: RoomMember = {
-      agentId,
-      kind: 'agent',
-      name,
-      role,
-      provider,
-      ...(input.model?.trim() ? { model: input.model.trim() } : {}),
-      status: 'working',
-      joinedAt: timestamp,
-      updatedAt: timestamp,
-    }
-    current.members.push(member)
-    this.appendEvent(current, 'member.joined', `${name} joined as ${role}`, {
-      actorAgentId: parent.id,
-      targetAgentId: agentId,
-    })
-    await this.changed(current)
-    return structuredClone(member)
+  async attachSession(
+    parent: Agent,
+    roomId: string,
+    input: { sessionId: string; name?: string },
+    signal: AbortSignal,
+  ): Promise<RoomMember> {
+    return this.attachMember(parent, roomId, {
+      providerId: DSH_SESSION_MEMBER_PROVIDER,
+      descriptor: { sessionId: input.sessionId },
+      ...(input.name ? { name: input.name } : {}),
+    }, signal)
   }
 
   async sendMessage(
     parent: Agent,
     roomId: string,
-    targetAgentId: string,
+    targetMemberId: string,
     message: string,
     signal: AbortSignal,
-  ): Promise<{ messageId: string }> {
-    const room = this.openOwnedRoom(parent, roomId)
-    const member = this.activeAgentMember(room, targetAgentId)
-    const text = cleanText(message, 'message', this.config.maxMessageChars)
-    const messageId = await this.followup(parent, member.agentId, text, signal)
-    member.status = 'working'
-    member.updatedAt = now()
-    this.appendEvent(room, 'message.direct', text, {
-      actorAgentId: parent.id,
-      targetAgentId: member.agentId,
-    })
-    await this.changed(room)
-    return { messageId }
+  ): Promise<{ deliveryId: string }> {
+    const initialRoom = this.acquireRoomOperation(parent, roomId)
+    try {
+      const initialMember = this.activeMember(initialRoom, targetMemberId)
+      const provider = this.requiredProvider(initialMember.connection.providerId)
+      const text = cleanText(message, 'message', this.config.maxMessageChars)
+      const delivered = await provider.deliver({
+        parent,
+        room: this.copy(initialRoom),
+        member: structuredClone(initialMember),
+        message: text,
+        signal,
+      })
+      const room = this.openOwnedRoom(parent, roomId)
+      const member = this.activeMember(room, targetMemberId)
+      member.status = 'working'
+      member.updatedAt = now()
+      this.appendEvent(room, 'message.direct', `Message delivered to ${member.name}`, {
+        actorMemberId: this.leader(room).memberId,
+        targetMemberId: member.memberId,
+      })
+      await this.changed(room)
+      return delivered
+    } finally {
+      this.releaseRoomOperation(roomId)
+    }
   }
 
   async broadcast(parent: Agent, roomId: string, message: string, signal: AbortSignal): Promise<BroadcastDelivery[]> {
-    const room = this.openOwnedRoom(parent, roomId)
-    const text = cleanText(message, 'message', this.config.maxMessageChars)
-    const members = room.members.filter(member => member.kind === 'agent' && member.status !== 'removed')
-    if (members.length === 0) throw new Error('agent-team-room: room has no Agent members')
-
-    const deliveries = await Promise.all(members.map(async (member): Promise<BroadcastDelivery> => {
-      try {
-        const messageId = await this.followup(parent, member.agentId, text, signal)
-        member.status = 'working'
-        member.updatedAt = now()
-        return { agentId: member.agentId, messageId }
-      } catch (error) {
-        member.status = 'error'
-        member.updatedAt = now()
-        return { agentId: member.agentId, error: String(error) }
-      }
-    }))
-    this.appendEvent(room, 'message.broadcast', text, { actorAgentId: parent.id })
-    await this.changed(room)
-    return structuredClone(deliveries)
-  }
-
-  async assignTask(
-    parent: Agent,
-    roomId: string,
-    input: { assigneeAgentId: string; title: string; instructions: string },
-    signal: AbortSignal,
-  ): Promise<RoomTask> {
-    const room = this.openOwnedRoom(parent, roomId)
-    const member = this.activeAgentMember(room, input.assigneeAgentId)
-    if (room.tasks.length >= this.config.maxTasksPerRoom) {
-      throw new Error(`agent-team-room: room task limit ${this.config.maxTasksPerRoom} reached`)
-    }
-    if (member.activeTaskId) {
-      const active = room.tasks.find(task => task.id === member.activeTaskId)
-      if (active && !isTerminalTask(active.status)) {
-        throw new Error(`agent-team-room: ${member.name} already owns active task ${active.id}`)
-      }
-    }
-    const timestamp = now()
-    const task: RoomTask = {
-      id: randomUUID(),
-      title: cleanText(input.title, 'task title', 200),
-      instructions: cleanText(input.instructions, 'task instructions', this.config.maxMessageChars),
-      assigneeAgentId: member.agentId,
-      status: 'queued',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    }
-    room.tasks.push(task)
-    member.activeTaskId = task.id
-    this.appendEvent(room, 'task.assigned', `Assigned “${task.title}” to ${member.name}`, {
-      actorAgentId: parent.id,
-      targetAgentId: member.agentId,
-      taskId: task.id,
-    })
-    await this.changed(room)
-
+    const initialRoom = this.acquireRoomOperation(parent, roomId)
     try {
-      task.messageId = await this.followup(
-        parent,
-        member.agentId,
-        `[Room task ${task.id}]\nRoom id: ${room.id}\nTitle: ${task.title}\n\n${task.instructions}`
-          + `\n\nWhen finished, call room_task_complete with room_id "${room.id}", task_id "${task.id}", `
-          + 'status "completed", and a concise report. If blocked, call it with status "failed" and explain why.',
-        signal,
-      )
-      task.status = 'running'
-      task.updatedAt = now()
-      member.status = 'working'
-      member.updatedAt = task.updatedAt
-    } catch (error) {
-      task.status = 'failed'
-      task.error = String(error)
-      task.updatedAt = now()
-      member.status = 'error'
-      member.updatedAt = task.updatedAt
-      delete member.activeTaskId
-      this.appendEvent(room, 'task.failed', `Could not deliver “${task.title}”: ${String(error)}`, {
-        actorAgentId: parent.id,
-        targetAgentId: member.agentId,
-        taskId: task.id,
+      const text = cleanText(message, 'message', this.config.maxMessageChars)
+      const members = initialRoom.members.filter(member => member.kind === 'member' && member.status !== 'removed')
+      if (members.length === 0) throw new Error('agent-team-room: room has no active members')
+
+      const deliveries = await Promise.all(members.map(async (member): Promise<BroadcastDelivery> => {
+        try {
+          const provider = this.requiredProvider(member.connection.providerId)
+          const delivered = await provider.deliver({
+            parent,
+            room: this.copy(initialRoom),
+            member: structuredClone(member),
+            message: text,
+            signal,
+          })
+          return { memberId: member.memberId, deliveryId: delivered.deliveryId }
+        } catch (error) {
+          return { memberId: member.memberId, error: error instanceof Error ? error.message : String(error) }
+        }
+      }))
+      const room = this.openOwnedRoom(parent, roomId)
+      for (const delivery of deliveries) {
+        const member = this.activeMember(room, delivery.memberId)
+        member.status = delivery.error ? 'error' : 'working'
+        member.updatedAt = now()
+      }
+      this.appendEvent(room, 'message.broadcast', `Broadcast delivered to ${members.length} member(s)`, {
+        actorMemberId: this.leader(room).memberId,
       })
+      await this.changed(room)
+      return structuredClone(deliveries)
+    } finally {
+      this.releaseRoomOperation(roomId)
     }
-    await this.changed(room)
-    return structuredClone(task)
   }
 
-  async completeTask(
-    reporter: Agent,
-    roomId: string,
-    taskId: string,
-    input: { status: 'completed' | 'failed'; report: string },
-  ): Promise<RoomTask> {
-    const room = this.room(roomId)
-    if (room.status !== 'open') throw new Error(`agent-team-room: room ${roomId} is closed`)
-    const member = this.activeAgentMember(room, reporter.id)
-    const task = room.tasks.find(candidate => candidate.id === taskId)
-    if (!task) throw new Error(`agent-team-room: unknown task ${taskId}`)
-    if (task.assigneeAgentId !== reporter.id) {
-      throw new Error(`agent-team-room: caller is not assigned task ${taskId}`)
-    }
-    if (isTerminalTask(task.status)) {
-      if (task.status === input.status) return structuredClone(task)
-      throw new Error(`agent-team-room: task ${taskId} is already ${task.status}`)
-    }
-
-    const report = cleanText(input.report, 'task report', this.config.maxResultChars)
-    const timestamp = now()
-    task.status = input.status
-    task.updatedAt = timestamp
-    if (input.status === 'completed') task.result = report
-    else task.error = report
-    if (member.activeTaskId === task.id) delete member.activeTaskId
-    member.lastResult = report
-    member.status = input.status === 'completed' ? 'idle' : 'error'
-    member.updatedAt = timestamp
-    this.appendEvent(
-      room,
-      input.status === 'completed' ? 'task.completed' : 'task.failed',
-      input.status === 'completed'
-        ? `${member.name} completed “${task.title}”`
-        : `${member.name} reported “${task.title}” failed`,
-      { actorAgentId: reporter.id, targetAgentId: reporter.id, taskId: task.id },
-    )
-    await this.changed(room)
-    return structuredClone(task)
-  }
-
-  async removeAgent(
+  async removeMember(
     parent: Agent,
     roomId: string,
-    agentId: string,
+    memberId: string,
     interruptRunning = true,
   ): Promise<RoomMember> {
-    const room = this.openOwnedRoom(parent, roomId)
-    const member = this.activeAgentMember(room, agentId)
-    if (interruptRunning) {
-      this.ctx.subagents.interrupt(SessionId(member.agentId), { kind: 'ancestor', agent: parent })
+    const room = this.acquireRoomOperation(parent, roomId)
+    try {
+      const member = this.activeMember(room, memberId)
+      const provider = this.providers.get(member.connection.providerId)
+      const providerRoom = this.copy(room)
+      const providerMember = structuredClone(member)
+      member.status = 'removed'
+      member.updatedAt = now()
+      this.appendEvent(room, 'member.left', `${member.name} detached`, {
+        actorMemberId: this.leader(room).memberId,
+        targetMemberId: member.memberId,
+      })
+      await this.changed(room)
+      if (interruptRunning && provider?.interrupt) {
+        try {
+          await provider.interrupt({ parent, room: providerRoom, member: providerMember })
+        } catch {
+          // Detachment is authoritative. Provider errors are not persisted because
+          // they may contain transport URLs, credentials, or other private detail.
+        }
+      }
+      return structuredClone(member)
+    } finally {
+      this.releaseRoomOperation(roomId)
     }
-    this.cancelMemberTask(room, member, 'Agent left the room')
-    member.status = 'removed'
-    member.updatedAt = now()
-    this.appendEvent(room, 'member.left', `${member.name} left the room`, {
-      actorAgentId: parent.id,
-      targetAgentId: member.agentId,
-    })
-    await this.changed(room)
-    return structuredClone(member)
   }
 
   async closeRoom(
@@ -500,103 +431,105 @@ export default class RoomRuntime extends Service {
     roomId: string,
     input: { summary?: string; interruptRunning?: boolean },
   ): Promise<Room> {
-    const room = this.openOwnedRoom(parent, roomId)
-    const requestedSummary = input.summary?.trim()
-    const summary = requestedSummary
-      ? cleanText(requestedSummary, 'summary', this.config.maxMessageChars)
-      : undefined
-    const shouldInterrupt = input.interruptRunning !== false
-    for (const member of room.members) {
-      if (member.kind !== 'agent' || member.status === 'removed') continue
-      if (shouldInterrupt) {
-        this.ctx.subagents.interrupt(SessionId(member.agentId), { kind: 'ancestor', agent: parent })
-        member.status = 'interrupted'
-      } else if (member.status === 'working' || member.status === 'starting') {
-        member.status = 'idle'
+    const room = this.acquireRoomOperation(parent, roomId)
+    try {
+      const summary = cleanOptionalText(input.summary, 'summary', this.config.maxMessageChars)
+      const shouldInterrupt = input.interruptRunning !== false
+      const providerRoom = this.copy(room)
+      const interrupts: Array<{
+        memberId: string
+        interrupt: NonNullable<RoomMemberProvider['interrupt']>
+        member: RoomMember
+      }> = []
+      for (const member of room.members) {
+        if (member.kind !== 'member' || member.status === 'removed') continue
+        const provider = this.providers.get(member.connection.providerId)
+        if (shouldInterrupt && provider?.interrupt) {
+          interrupts.push({
+            memberId: member.memberId,
+            interrupt: provider.interrupt.bind(provider),
+            member: structuredClone(member),
+          })
+          member.status = 'interrupted'
+        } else if (member.status === 'working') {
+          member.status = 'idle'
+        }
+        member.updatedAt = now()
       }
-      member.updatedAt = now()
-      this.cancelMemberTask(room, member, 'Room closed')
-    }
-    room.status = 'closed'
-    room.closedAt = now()
-    if (summary) room.summary = summary
-    this.appendEvent(room, 'room.closed', room.summary || 'Room closed', { actorAgentId: parent.id })
-    await this.changed(room)
-    return this.copy(room)
-  }
-
-  async waitForTasks(
-    parent: Agent,
-    roomId: string,
-    taskIds: readonly string[] | undefined,
-    timeoutMs: number,
-    signal: AbortSignal,
-  ): Promise<WaitResult> {
-    const initial = this.openOwnedRoom(parent, roomId)
-    const selected = taskIds && taskIds.length > 0
-      ? [...new Set(taskIds)]
-      : initial.tasks.filter(task => !isTerminalTask(task.status)).map(task => task.id)
-    for (const taskId of selected) {
-      if (!initial.tasks.some(task => task.id === taskId)) throw new Error(`agent-team-room: unknown task ${taskId}`)
-    }
-    const boundedTimeout = Math.max(0, Math.min(Math.trunc(timeoutMs), 300_000))
-
-    const snapshot = (): WaitResult => {
-      const room = this.ownedRoom(parent, roomId)
-      const tasks = selected.map(taskId => room.tasks.find(task => task.id === taskId) as RoomTask)
-      return {
-        completed: tasks.every(task => isTerminalTask(task.status)),
-        timedOut: false,
-        tasks: structuredClone(tasks),
-      }
-    }
-    const current = snapshot()
-    if (current.completed || selected.length === 0 || boundedTimeout === 0) {
-      return { ...current, timedOut: !current.completed && boundedTimeout === 0 }
-    }
-
-    return await new Promise<WaitResult>((resolve, reject) => {
-      let settled = false
-      const finish = (result: WaitResult): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        unsubscribe()
-        signal.removeEventListener('abort', onAbort)
-        resolve(result)
-      }
-      const onAbort = (): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        unsubscribe()
-        reject(signal.reason ?? new Error('agent-team-room: wait aborted'))
-      }
-      const unsubscribe = this.subscribe(changedRoomId => {
-        if (changedRoomId !== roomId) return
-        const result = snapshot()
-        if (result.completed) finish(result)
+      room.status = 'closed'
+      room.closedAt = now()
+      if (summary) room.summary = summary
+      this.appendEvent(room, 'room.closed', room.summary || 'Room closed', {
+        actorMemberId: this.leader(room).memberId,
       })
-      const timer = setTimeout(() => {
-        const result = snapshot()
-        finish({ ...result, timedOut: !result.completed })
-      }, boundedTimeout)
-      signal.addEventListener('abort', onAbort, { once: true })
-      if (signal.aborted) onAbort()
-    })
+      await this.changed(room)
+
+      let providerStatusChanged = false
+      for (const target of interrupts) {
+        try {
+          await target.interrupt({ parent, room: providerRoom, member: target.member })
+        } catch {
+          const current = room.members.find(member => member.memberId === target.memberId)
+          if (current && current.status !== 'removed') {
+            current.status = 'error'
+            current.updatedAt = now()
+            providerStatusChanged = true
+          }
+        }
+      }
+      if (providerStatusChanged) await this.changed(room)
+      return this.copy(room)
+    } finally {
+      this.releaseRoomOperation(roomId)
+    }
   }
 
-  private async followup(parent: Agent, agentId: string, text: string, signal: AbortSignal): Promise<string> {
-    const messageId = await this.ctx.subagents.followup(
-      parent,
-      SessionId(agentId),
-      [{ type: 'text', text }],
-      {
-        source: { kind: 'coordinator', form: 'relay', senderSessionId: parent.id },
-        signal,
+  private dshSessionProvider(): RoomMemberProvider {
+    return {
+      id: DSH_SESSION_MEMBER_PROVIDER,
+      attach: async ({ parent, descriptor, requestedName, requestedProfile, signal }) => {
+        const { sessionId } = dshSessionDescriptor(descriptor)
+        const children = await this.ctx.subagents.listChildren(SessionId(parent.id), signal)
+        const child = children.find(candidate => candidate.kind === 'child' && candidate.id === sessionId)
+        if (!child || child.kind !== 'child' || child.mode !== 'continuable') {
+          throw new Error(`agent-team-room: ${sessionId} is not a continuable direct child of this leader`)
+        }
+        const profile = validatedProfile(requestedProfile)
+        return {
+          name: requestedName?.trim() || child.label,
+          connection: {
+            protocol: DSH_SESSION_MEMBER_PROTOCOL,
+            address: { sessionId },
+            sessionId,
+          },
+          ...(profile ? { profile } : {}),
+          initialStatus: child.activity === 'running' ? 'working' : 'idle',
+        }
       },
-    )
-    return messageId
+      deliver: async ({ parent, member, message, signal }) => {
+        const { sessionId } = dshSessionDescriptor(member.connection.address)
+        const deliveryId = await this.ctx.subagents.followup(
+          parent,
+          SessionId(sessionId),
+          [{ type: 'text', text: message }],
+          {
+            source: { kind: 'coordinator', form: 'relay', senderSessionId: parent.id },
+            signal,
+          },
+        )
+        return { deliveryId }
+      },
+      interrupt: ({ parent, member }) => {
+        const { sessionId } = dshSessionDescriptor(member.connection.address)
+        this.ctx.subagents.interrupt(SessionId(sessionId), { kind: 'ancestor', agent: parent })
+      },
+    }
+  }
+
+  private requiredProvider(providerId: string): RoomMemberProvider {
+    const provider = this.providers.get(providerId)
+    if (!provider) throw new Error(`agent-team-room: member provider ${providerId} is unavailable`)
+    return provider
   }
 
   private room(roomId: string): Room {
@@ -607,7 +540,7 @@ export default class RoomRuntime extends Service {
 
   private ownedRoom(parent: Agent, roomId: string): Room {
     const room = this.room(roomId)
-    if (room.leaderAgentId !== parent.id) throw new Error(`agent-team-room: caller does not lead room ${roomId}`)
+    if (room.leaderSessionId !== parent.id) throw new Error(`agent-team-room: caller does not lead room ${roomId}`)
     return room
   }
 
@@ -617,24 +550,53 @@ export default class RoomRuntime extends Service {
     return room
   }
 
-  private activeAgentMember(room: Room, agentId: string): RoomMember {
-    const member = room.members.find(candidate => candidate.agentId === agentId && candidate.kind === 'agent')
-    if (!member || member.status === 'removed') throw new Error(`agent-team-room: agent ${agentId} is not an active room member`)
+  private leader(room: Room): RoomMember {
+    const member = room.members.find(candidate => candidate.kind === 'leader')
+    if (!member) throw new Error(`agent-team-room: room ${room.id} has no leader member`)
     return member
   }
 
-  private assertMemberCapacity(room: Room): void {
+  private activeMember(room: Room, memberId: string): RoomMember {
+    const member = room.members.find(candidate => candidate.memberId === memberId && candidate.kind === 'member')
+    if (!member || member.status === 'removed') {
+      throw new Error(`agent-team-room: member ${memberId} is not active in room ${room.id}`)
+    }
+    return member
+  }
+
+  private acquireRoomOperation(parent: Agent, roomId: string): Room {
+    const room = this.openOwnedRoom(parent, roomId)
+    if (this.busyRooms.has(roomId)) {
+      throw new Error(`agent-team-room: room ${roomId} has another mutation in progress`)
+    }
+    this.busyRooms.add(roomId)
+    return room
+  }
+
+  private releaseRoomOperation(roomId: string): void {
+    this.busyRooms.delete(roomId)
+  }
+
+  private reserve(room: Room): void {
     const active = room.members.filter(member => member.status !== 'removed').length
-    if (active >= this.config.maxMembersPerRoom) {
+    const reserved = this.reservations.get(room.id) ?? 0
+    if (active + reserved >= this.config.maxMembersPerRoom) {
       throw new Error(`agent-team-room: room member limit ${this.config.maxMembersPerRoom} reached`)
     }
+    this.reservations.set(room.id, reserved + 1)
+  }
+
+  private releaseReservation(roomId: string): void {
+    const reserved = this.reservations.get(roomId) ?? 0
+    if (reserved <= 1) this.reservations.delete(roomId)
+    else this.reservations.set(roomId, reserved - 1)
   }
 
   private appendEvent(
     room: Room,
     type: RoomEventType,
     message: string,
-    detail: Pick<RoomEvent, 'actorAgentId' | 'targetAgentId' | 'taskId'> = {},
+    detail: Pick<RoomEvent, 'actorMemberId' | 'targetMemberId'> = {},
   ): void {
     const timestamp = now()
     room.events.push({ id: randomUUID(), type, at: timestamp, message, ...detail })
@@ -644,27 +606,23 @@ export default class RoomRuntime extends Service {
     room.updatedAt = timestamp
   }
 
-  private cancelMemberTask(room: Room, member: RoomMember, reason: string): void {
-    if (!member.activeTaskId) return
-    const task = room.tasks.find(candidate => candidate.id === member.activeTaskId)
-    delete member.activeTaskId
-    if (!task || isTerminalTask(task.status)) return
-    task.status = 'cancelled'
-    task.error = reason
-    task.updatedAt = now()
-    this.appendEvent(room, 'task.cancelled', `${task.title}: ${reason}`, {
-      targetAgentId: member.agentId,
-      taskId: task.id,
-    })
-  }
-
   private copy(room: Room): Room {
     return structuredClone(room)
   }
 
   private async changed(room: Room): Promise<void> {
     await this.persist()
-    for (const listener of this.listeners) listener(room.id)
+    this.notify(room.id)
+  }
+
+  private notify(roomId: string): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(roomId)
+      } catch {
+        // Observers cannot roll back a Room mutation that is already durable.
+      }
+    }
   }
 
   private persist(): Promise<void> {
@@ -679,22 +637,13 @@ export default class RoomRuntime extends Service {
       if (room.status !== 'open') continue
       let roomChanged = false
       for (const member of room.members) {
-        if (member.status === 'starting' || member.status === 'working') {
-          member.status = 'idle'
-          member.updatedAt = now()
-          roomChanged = true
-        }
-        delete member.activeTaskId
-      }
-      for (const task of room.tasks) {
-        if (task.status !== 'queued' && task.status !== 'running') continue
-        task.status = 'failed'
-        task.error = 'Harness restarted before Agent Team Room observed a terminal result'
-        task.updatedAt = now()
+        if (member.kind !== 'member' || member.status !== 'working') continue
+        member.status = 'idle'
+        member.updatedAt = now()
         roomChanged = true
       }
       if (roomChanged) {
-        this.appendEvent(room, 'system.recovered', 'Recovered room state after Harness restart; in-flight tasks were marked failed')
+        this.appendEvent(room, 'system.recovered', 'Recovered member state after Harness restart')
         changed = true
       }
     }
@@ -713,43 +662,38 @@ export default class RoomRuntime extends Service {
   }
 
   private async onSubagentStart(info: LifecycleInfo): Promise<void> {
-    const touched: Room[] = []
-    for (const room of this.roomsById.values()) {
-      if (room.status !== 'open') continue
-      const member = room.members.find(candidate => candidate.agentId === info.id && candidate.status !== 'removed')
-      if (!member) continue
-      member.status = 'working'
-      member.updatedAt = now()
-      this.appendEvent(room, 'member.started', `${member.name} started a turn`, { targetAgentId: member.agentId })
-      touched.push(room)
-    }
-    if (touched.length === 0) return
-    await this.persist()
-    for (const room of touched) for (const listener of this.listeners) listener(room.id)
+    await this.updateDshMemberLifecycle(info.id, 'working', 'started a turn')
   }
 
   private async onSubagentEnd(info: LifecycleInfo): Promise<void> {
+    const status = info.stopReason === 'completed' ? 'idle' : 'error'
+    await this.updateDshMemberLifecycle(info.id, status, `finished a turn (${info.stopReason || 'unknown'})`)
+  }
+
+  private async updateDshMemberLifecycle(
+    sessionId: string,
+    status: Extract<RoomMember['status'], 'working' | 'idle' | 'error'>,
+    action: string,
+  ): Promise<void> {
     const touched: Room[] = []
     for (const room of this.roomsById.values()) {
       if (room.status !== 'open') continue
-      const member = room.members.find(candidate => candidate.agentId === info.id && candidate.status !== 'removed')
+      const member = room.members.find(candidate => (
+        candidate.kind === 'member'
+        && candidate.status !== 'removed'
+        && candidate.connection.providerId === DSH_SESSION_MEMBER_PROVIDER
+        && candidate.connection.sessionId === sessionId
+      ))
       if (!member) continue
-      const completed = info.stopReason === 'completed'
-      const pendingTask = member.activeTaskId
-        ? room.tasks.find(task => task.id === member.activeTaskId && !isTerminalTask(task.status))
-        : undefined
-      member.status = completed && !pendingTask ? 'idle' : 'error'
+      member.status = status
       member.updatedAt = now()
-      const message = pendingTask
-        ? `${member.name} finished a turn without reporting “${pendingTask.title}”; task remains ${pendingTask.status}`
-        : `${member.name} finished a turn (${info.stopReason || 'unknown'})`
-      this.appendEvent(room, 'member.settled', message, {
-        targetAgentId: member.agentId,
+      this.appendEvent(room, status === 'working' ? 'member.started' : 'member.settled', `${member.name} ${action}`, {
+        targetMemberId: member.memberId,
       })
       touched.push(room)
     }
     if (touched.length === 0) return
     await this.persist()
-    for (const room of touched) for (const listener of this.listeners) listener(room.id)
+    for (const room of touched) this.notify(room.id)
   }
 }

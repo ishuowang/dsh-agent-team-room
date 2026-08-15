@@ -1,11 +1,10 @@
-# Agent Team Room is split into a durable host service, model-facing tools,
-# a Host slash command, and an optional Web dashboard. Web-only rows stay pending
-# when their injected services are not part of the active profile.
+# Room is split into a durable host service, model-facing tools, a Host slash
+# command, and the read-only transport used by its additive native Web UI.
 - insert:
     - id: agent-team-room
       name: 'dsh-agent-team-room'
       config:
-        provider: spawn
+        maxMembersPerRoom: 16
 
     - id: agent-team-room-tools
       name: 'dsh-agent-team-room/tools'
@@ -13,5 +12,5 @@
     - id: agent-team-room-commands
       name: 'dsh-agent-team-room/commands'
 
-    - id: agent-team-room-dashboard
-      name: 'dsh-agent-team-room/dashboard'
+    - id: agent-team-room-native-api
+      name: 'dsh-agent-team-room/native-api'

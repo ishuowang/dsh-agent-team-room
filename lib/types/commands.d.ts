@@ -1,22 +1,44 @@
 import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "agent-team-room-commands";
 export declare const inject: string[];
-export type ParsedRoomTemplateCommand = {
-    readonly action: 'list';
+export type ParsedRoomCommand = {
+    action: 'list';
+    includeClosed: boolean;
 } | {
-    readonly action: 'show';
-    readonly templateId: string;
+    action: 'show';
+    roomId: string;
 } | {
-    readonly action: 'create';
-    readonly templateId: string;
-    readonly name?: string;
-    readonly objective?: string;
-    readonly provider?: string;
-    readonly modelProvider?: string;
-    readonly model?: string;
+    action: 'create';
+    name: string;
+    topic?: string;
+} | {
+    action: 'attach';
+    roomId: string;
+    sessionId: string;
+    name?: string;
+} | {
+    action: 'remove';
+    roomId: string;
+    memberId: string;
+    interrupt: boolean;
+} | {
+    action: 'send';
+    roomId: string;
+    memberId: string;
+    message: string;
+} | {
+    action: 'broadcast';
+    roomId: string;
+    message: string;
+} | {
+    action: 'close';
+    roomId: string;
+    summary?: string;
+    interrupt: boolean;
 };
-/** Parse the exact input following `/room-template`. Throws a user-facing syntax error. */
-export declare function parseRoomTemplateCommand(rawInput: string): ParsedRoomTemplateCommand;
-/** Register the Host-native Room template command. */
+/** Tokenize command input without invoking a shell or accepting expansion. */
+export declare function tokenizeRoomCommand(rawInput: string): string[];
+export declare function parseRoomCommand(rawInput: string): ParsedRoomCommand;
+/** Register the generic Host-native Room command used by the native UI. */
 export declare function apply(ctx: Context): void;
 //# sourceMappingURL=commands.d.ts.map
