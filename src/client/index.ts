@@ -2,6 +2,11 @@ import { createElement, useCallback, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, ReactElement, ReactNode } from 'react'
 import type { ClientContext, ISessions, SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {
+  ClientSessionContext,
+  InputTriggerCandidate,
+  InputTriggerSource,
+} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import {
   Button,
   IconCloseOutline16,
@@ -48,6 +53,8 @@ export const ROOM_HEADER_ENTRY_ID = 'dsh-agent-team-room-header'
 export const ROOM_FOOTER_ENTRY_ID = 'dsh-agent-team-room-footer'
 export const ROOM_NATIVE_API_PREFIX = '/agent-team-room/api/session/'
 export const ROOM_INVITE_PROVIDER_SLOT = 'agent-team-room.invite.provider'
+export const ROOM_FOOTER_INVITE_PROVIDER_SLOT = 'agent-team-room.invite.provider.footer'
+export const ROOM_MENTION_SOURCE_NAME = 'Room members'
 
 /** Owner props exposed to optional member-source plugins inside the Room invite panel. */
 export interface RoomInviteProviderOwnerProps {
@@ -66,16 +73,170 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       scope: 'session'
       owner: RoomInviteProviderOwnerProps
     }
+    /** Footer-owned equivalent; SlotCore requires every declared child key to be globally unique. */
+    'agent-team-room.invite.provider.footer': {
+      kind: 'list'
+      scope: 'session'
+      owner: RoomInviteProviderOwnerProps
+    }
   }
 }
 
 export type RoomsHeaderActionProps = PropsRuntime<'conversation.session.header.actions'>
 export type RoomsFooterActionProps = PropsRuntime<'sidebar.footer.action'> & SidebarFooterActionOwnerProps
 type RoomsHeaderHostProps = RoomsHeaderActionProps & PropsRenderSlots<typeof ROOM_INVITE_PROVIDER_SLOT>
-type RoomsFooterHostProps = RoomsFooterActionProps & PropsRenderSlots<typeof ROOM_INVITE_PROVIDER_SLOT>
+type RoomsFooterHostProps = RoomsFooterActionProps & PropsRenderSlots<typeof ROOM_FOOTER_INVITE_PROVIDER_SLOT>
 
 interface RoomsSnapshot {
   rooms: RoomView[]
+}
+
+/** Extra identity kept on native @ candidates without changing their rendered contract. */
+export interface RoomMentionCandidate extends InputTriggerCandidate {
+  readonly roomId: string
+  readonly roomName: string
+  readonly memberId: string
+  readonly memberName: string
+}
+
+interface RoomMentionTarget {
+  roomId: string
+  roomName: string
+  memberId: string
+  memberName: string
+  status: RoomMemberView['status']
+}
+
+type RoomSnapshotLoader = (sessionId: string, signal?: AbortSignal) => Promise<RoomsSnapshot>
+type RoomMentionSender = (
+  sessionId: string,
+  roomId: string,
+  memberId: string,
+  message: string,
+) => Promise<void>
+
+function mentionShortId(value: string): string {
+  return value.length <= 10 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`
+}
+
+/** Current, deliverable Room members projected into the native DSH @ menu. */
+export function roomMentionCandidates(snapshot: RoomsSnapshot, sessionId: string): RoomMentionCandidate[] {
+  const targets: RoomMentionTarget[] = snapshot.rooms.flatMap(room => {
+    if (room.status !== 'open' || room.leaderSessionId !== sessionId) return []
+    return room.members.flatMap(member => {
+      if (
+        member.kind !== 'member'
+        || member.status === 'removed'
+        || member.connection.sessionId === sessionId
+      ) return []
+      return [{
+        roomId: room.id,
+        roomName: room.name,
+        memberId: member.memberId,
+        memberName: member.name,
+        status: member.status,
+      }]
+    })
+  })
+  const nameCounts = new Map<string, number>()
+  const roomNameCounts = new Map<string, number>()
+  for (const target of targets) {
+    nameCounts.set(target.memberName, (nameCounts.get(target.memberName) ?? 0) + 1)
+    const key = `${target.memberName}\0${target.roomName}`
+    roomNameCounts.set(key, (roomNameCounts.get(key) ?? 0) + 1)
+  }
+  return targets.map(target => {
+    const shortMemberId = mentionShortId(target.memberId)
+    const duplicateName = (nameCounts.get(target.memberName) ?? 0) > 1
+    const duplicateInRoomName = (roomNameCounts.get(`${target.memberName}\0${target.roomName}`) ?? 0) > 1
+    const name = !duplicateName
+      ? target.memberName
+      : duplicateInRoomName
+        ? `${target.memberName} · ${target.roomName} · ${shortMemberId}`
+        : `${target.memberName} · ${target.roomName}`
+    const detail = `${target.roomName} · ${target.status} · ${shortMemberId}`
+    return {
+      name,
+      description: detail,
+      hint: detail,
+      roomId: target.roomId,
+      roomName: target.roomName,
+      memberId: target.memberId,
+      memberName: target.memberName,
+    }
+  })
+}
+
+function matchesMention(candidate: RoomMentionCandidate, query: string): boolean {
+  const needle = query.trim().toLocaleLowerCase()
+  if (!needle) return true
+  return [candidate.memberName, candidate.memberId, candidate.roomName]
+    .some(value => value.toLocaleLowerCase().includes(needle))
+}
+
+/**
+ * Register through DSH's native input-trigger pipeline. That pipeline owns
+ * the accessible listbox, caret-span CAS, keyboard navigation, and pointer
+ * selection; Room contributes only trusted candidate data.
+ */
+export function createRoomMentionSource(
+  loader: RoomSnapshotLoader = loadRoomSnapshot,
+  send: RoomMentionSender = async () => { throw new Error('Room mention delivery is unavailable') },
+): InputTriggerSource {
+  const targets = new WeakMap<InputTriggerCandidate, {
+    sessionId: string
+    roomId: string
+    memberId: string
+    memberName: string
+  }>()
+
+  const refresh = async (session: ClientSessionContext, signal?: AbortSignal): Promise<readonly RoomMentionCandidate[]> => {
+    const sessionId = String(session.sessionId)
+    const snapshot = await loader(sessionId, signal)
+    const candidates = roomMentionCandidates(snapshot, sessionId)
+    for (const candidate of candidates) {
+      targets.set(candidate, {
+        sessionId,
+        roomId: candidate.roomId,
+        memberId: candidate.memberId,
+        memberName: candidate.memberName,
+      })
+    }
+    return candidates
+  }
+
+  return {
+    trigger: '@',
+    name: ROOM_MENTION_SOURCE_NAME,
+    order: 20,
+    async candidates(session, { query, position, signal }) {
+      if (position !== 'leading') return []
+      return (await refresh(session, signal)).filter(candidate => matchesMention(candidate, query))
+    },
+    onPick({ candidate, position }) {
+      const target = targets.get(candidate)
+      if (!target || position !== 'leading') return undefined
+      return {
+        claim: {
+          token: `@${target.memberName} `,
+          hint: 'message for this Room member',
+          async submit(args) {
+            const message = args.trim()
+            if (!message) return { kind: 'error', text: `Write a message for ${target.memberName}.` }
+            try {
+              await send(target.sessionId, target.roomId, target.memberId, message)
+              return { kind: 'success', text: `Sent to ${target.memberName}.` }
+            } catch (error) {
+              return {
+                kind: 'error',
+                text: error instanceof Error ? error.message : String(error),
+              }
+            }
+          },
+        },
+      }
+    },
+  }
 }
 
 interface LauncherProps {
@@ -752,12 +913,32 @@ function RoomsLauncher({
   })
 }
 
-/** Required DSH services: additive slots and the native Session runtime. */
-export const inject = ['slots', 'sessions']
+/** Required DSH services: additive slots, native Session runtime, and native @ pipeline. */
+export const inject = ['slots', 'sessions', 'inputTriggers']
 
 /** Register Room controls without replacing any DSH root, sidebar, conversation, or details surface. */
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.get('sessions') as unknown as ISessions
+  const inputTriggers = ctx.get('inputTriggers')
+  if (!inputTriggers) throw new Error('agent-team-room: native inputTriggers service is unavailable')
+
+  ctx.effect(
+    () => inputTriggers.registerSource(createRoomMentionSource(loadRoomSnapshot, async (
+      sessionId,
+      roomId,
+      memberId,
+      message,
+    ) => {
+      const live = sessions.binding(sessionId as SessionId)?.session
+      if (!live) throw new Error('The current Session is not materialized yet')
+      const result = await live.command(
+        `/room send ${commandQuote(roomId)} ${commandQuote(memberId)} --message ${commandQuote(message)}`,
+      )
+      if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+      if (!result.value.matched) throw new Error('The Host does not offer the /room command')
+    })),
+    'agent-team-room: @ member source',
+  )
 
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
     name: 'conversation.session.header.actions',
@@ -782,7 +963,7 @@ export function apply(ctx: ClientContext): void {
     id: ROOM_FOOTER_ENTRY_ID,
     order: 20,
     children: {
-      [ROOM_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+      [ROOM_FOOTER_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
     },
   }, (props: RoomsFooterHostProps) => {
     const sessionsState = props.useSessions(value => value)
@@ -792,7 +973,7 @@ export function apply(ctx: ClientContext): void {
       sessionsState,
       wide: props.wide,
       location: 'footer',
-      renderInviteProviders: owner => props.renderSlot(ROOM_INVITE_PROVIDER_SLOT, owner),
+      renderInviteProviders: owner => props.renderSlot(ROOM_FOOTER_INVITE_PROVIDER_SLOT, owner),
     })
   }))
 }

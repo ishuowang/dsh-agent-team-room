@@ -6,7 +6,7 @@
 
 Room is coordination plumbing—not a team template, role library, task board, or second chat app.
 
-[简体中文](README.zh.md) · [Install](#install) · [Native UI](#native-dsh-ui) · [Commands](#room-command) · [Provider SPI](#member-provider-spi) · [AI-agent support](#ai-agent-support--permission-required) · [Security](SECURITY.md)
+[简体中文](README.zh.md) · [Install](#install) · [Native UI](#native-dsh-ui) · [@ mentions](#mention-a-room-member) · [Commands](#room-command) · [Provider SPI](#member-provider-spi) · [AI-agent support](#ai-agent-support--permission-required) · [Security](SECURITY.md)
 
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-0.1.0--rc.6-6C5CE7?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/ishuowang/dsh-agent-team-room/)
@@ -51,7 +51,7 @@ This separation keeps Room useful for ordinary Sessions, RoleHub roles, and futu
 
 Room extends DSH Web through the official typed `conversation.session.header.actions` and `sidebar.footer.action` slots. Both entries open the same native `Modal`; the conversation, composer, sidebar, and details surfaces remain mounted and usable.
 
-Inside the member attach panel, Room declares the optional typed list slot `agent-team-room.invite.provider`. A bridge such as [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) can contribute its own verified member picker there. With no provider installed the slot renders nothing, so Room's standalone behavior is unchanged.
+Inside the member attach panel, Room declares optional typed provider seats for both native launchers: the backward-compatible header key `agent-team-room.invite.provider` and the footer key `agent-team-room.invite.provider.footer`. A bridge such as [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) can contribute the same verified member picker to both. Each child-slot key is declared exactly once, as required by DSH SlotCore. With no provider installed the seats render nothing, so Room's standalone behavior is unchanged.
 
 <p align="center">
   <img src="assets/native-room.png" width="768" alt="Agent Team Room overview inside a native DSH Web modal">
@@ -67,6 +67,20 @@ The modal can create a Room, select one led by or containing the current Session
   <sub>Member management with synthetic demo Sessions: attach, open, message, broadcast, remove, and close.</sub>
 </p>
 
+### Mention a Room member
+
+From a Session that leads an open Room, start a native composer draft with `@`. Room contributes a `Room members` source to DSH's built-in input-trigger menu, so search, arrow-key navigation, Enter, Escape, pointer selection, accessibility semantics, and caret-safe insertion all stay native.
+
+<p align="center">
+  <img src="assets/native-mentions.png" width="768" alt="Native DSH composer showing Room member suggestions after typing at-sign">
+  <br>
+  <sub>Real bundled DSH UI with synthetic Room data. Candidate details disambiguate the Room, lifecycle state, and stable member identity.</sub>
+</p>
+
+The picker lists only non-removed members from open Rooms led by the current Session. A selected candidate retains the exact Room and member ids even when labels collide. Submitting `@Mira …` relays only the remaining message through the existing leader-authorized `/room send` path; it does not broadcast, does not parse a display name on the Host, and does not send the text to the leader model first. The Host rechecks Room ownership and membership at delivery time, so a stale picker fails closed.
+
+Room mentions are deliberately leading-only in v0.6. Inline `@` remains available to other DSH reference sources instead of silently changing an ordinary model prompt into a Room mutation.
+
 The UI reads a field-whitelisted membership snapshot from a small same-origin `GET` endpoint. That endpoint accepts no mutations and omits provider addresses, profile digests, event history, message bodies, and Session transcripts. Every write goes back through `/room`, where the Host repeats leader ownership checks.
 
 ## Install
@@ -74,7 +88,7 @@ The UI reads a field-whitelisted membership snapshot from a small same-origin `G
 Requirements: Node.js `^22.19.0 || >=24` and DeepSeek Harness `0.1.0-rc.6`.
 
 ```sh
-dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.5.0
+dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.6.0
 dsh web
 ```
 
@@ -106,6 +120,8 @@ Room does not spawn a role or inject a prompt. Create a continuable child Sessio
 /room send <room-id> <member-id> --message "Review the release boundary."
 /room broadcast <room-id> --message "Post your current status."
 ```
+
+Or, from the Room leader's native DSH composer, type `@`, choose one member, write the message, and press Enter. The selected member receives a direct Room relay without involving the leader model.
 
 Removing a member detaches it from the Room and, by default, asks its provider to interrupt active work. Closing a Room does the same for remaining members and retains bounded metadata history. Neither operation deletes a backing Session or transport.
 
