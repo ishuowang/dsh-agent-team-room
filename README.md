@@ -51,6 +51,8 @@ This separation keeps Room useful for ordinary Sessions, RoleHub roles, and futu
 
 Room extends DSH Web through the official typed `conversation.session.header.actions` and `sidebar.footer.action` slots. Both entries open the same native `Modal`; the conversation, composer, sidebar, and details surfaces remain mounted and usable.
 
+Inside the member attach panel, Room declares the optional typed list slot `agent-team-room.invite.provider`. A bridge such as [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) can contribute its own verified member picker there. With no provider installed the slot renders nothing, so Room's standalone behavior is unchanged.
+
 <p align="center">
   <img src="assets/native-room.png" width="768" alt="Agent Team Room overview inside a native DSH Web modal">
   <br>
@@ -72,7 +74,7 @@ The UI reads a field-whitelisted membership snapshot from a small same-origin `G
 Requirements: Node.js `^22.19.0 || >=24` and DeepSeek Harness `0.1.0-rc.6`.
 
 ```sh
-dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.4.0
+dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.5.0
 dsh web
 ```
 
@@ -152,6 +154,23 @@ ctx.rooms.registerMemberProvider({
 
 An integration prepares a member, then calls `ctx.rooms.attachMember(...)` with its provider id and opaque descriptor. Provider code runs inside the trusted DSH Host process: install and review it with the same care as any other privileged plugin. Room reserves capacity before provider preparation and can invoke provider-owned rollback if the membership commit fails.
 
+For an already-created continuable direct-child DSH Session, the public convenience API also accepts optional provider-neutral provenance:
+
+```ts
+await ctx.rooms.attachSession(parent, roomId, {
+  sessionId: childSessionId,
+  name: 'Reviewer',
+  profile: {
+    apiVersion: 'profiles.example/v1',
+    kind: 'AgentProfile',
+    id: 'reviewer',
+    version: '1.0.0',
+  },
+}, signal)
+```
+
+`profile` is a small JSON-serializable identity reference (`apiVersion`, `kind`, `id`, and optional `version`/`digest`). Room forwards it through the same provider path, validates and persists a detached copy, and never interprets it as a capability grant. Existing `attachSession` calls without `profile` are unchanged.
+
 ### Optional RoleHub provenance
 
 Room does not depend on RoleHub, discover roles, install skills, or interpret role capabilities. A separate trusted bridge may verify and materialize a RoleHub role, attach the resulting member, and supply this provenance:
@@ -166,7 +185,7 @@ Room does not depend on RoleHub, discover roles, install skills, or interpret ro
 }
 ```
 
-Room validates the shape, persists it, and shows a RoleHub badge. The record is **non-authorizing provenance**: it does not prove bundle trust, grant tools, or widen DSH permissions. Verification, effective policy, role setup, and Session creation belong to the independent bridge and Host policy.
+An independent bridge can pass this object directly as `attachSession(...).profile`. Room validates the generic identity envelope plus the recognized RoleHub digest shape, persists it, and shows a RoleHub badge. The record is **non-authorizing provenance**: it does not prove bundle trust, grant tools, or widen DSH permissions. Verification, effective policy, role setup, and Session creation belong to the independent bridge and Host policy.
 
 ## Configuration
 

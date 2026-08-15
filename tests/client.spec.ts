@@ -50,6 +50,7 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 import {
   ROOM_FOOTER_ENTRY_ID,
   ROOM_HEADER_ENTRY_ID,
+  ROOM_INVITE_PROVIDER_SLOT,
   ROOM_NATIVE_API_PREFIX,
   apply,
   inject,
@@ -58,7 +59,12 @@ import {
 } from '../src/client/index.js'
 
 interface RegisteredEntry {
-  registration: { name: string; id: string; order: number }
+  registration: {
+    name: string
+    id: string
+    order: number
+    children?: Record<string, { kind: string; scope: string }>
+  }
   component: (props: Record<string, unknown>) => FakeElement
 }
 
@@ -83,8 +89,16 @@ function clientHarness() {
 function renderLauncher(entry: RegisteredEntry, location: 'header' | 'footer'): FakeElement {
   const state = { current: 'leader-1', subagentsByParent: {} }
   const ownerProps = location === 'header'
-    ? { sessionId: 'leader-1', useSessions: (selector: (value: typeof state) => unknown) => selector(state) }
-    : { wide: true, useSessions: (selector: (value: typeof state) => unknown) => selector(state) }
+    ? {
+        sessionId: 'leader-1',
+        useSessions: (selector: (value: typeof state) => unknown) => selector(state),
+        renderSlot: () => null,
+      }
+    : {
+        wide: true,
+        useSessions: (selector: (value: typeof state) => unknown) => selector(state),
+        renderSlot: () => null,
+      }
   const launcher = entry.component(ownerProps)
   if (typeof launcher.type !== 'function') throw new Error('slot contribution did not return the Room launcher')
   return launcher.type(launcher.props) as FakeElement
@@ -129,11 +143,17 @@ describe('native DSH Web entry', () => {
         name: 'conversation.session.header.actions',
         id: ROOM_HEADER_ENTRY_ID,
         order: 20,
+        children: {
+          [ROOM_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+        },
       },
       {
         name: 'sidebar.footer.action',
         id: ROOM_FOOTER_ENTRY_ID,
         order: 20,
+        children: {
+          [ROOM_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+        },
       },
     ])
     expect(entries.map(entry => entry.registration.name)).not.toContain('root')

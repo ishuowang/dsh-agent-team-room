@@ -114,6 +114,16 @@ export interface AttachRoomMemberInput {
   profile?: RoomMemberProfileRef
 }
 
+/**
+ * Public convenience input for attaching an existing continuable DSH Session.
+ * `profile` is optional provider-neutral provenance; it never grants authority.
+ */
+export interface AttachDshSessionInput {
+  sessionId: string
+  name?: string
+  profile?: RoomMemberProfileRef
+}
+
 export interface RoomMemberAttachment {
   name: string
   connection: Omit<RoomMemberConnection, 'providerId'>

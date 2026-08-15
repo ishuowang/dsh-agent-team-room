@@ -15,7 +15,7 @@ import {
   RiskConfirmation,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 
 interface RoomMemberView {
@@ -47,9 +47,32 @@ interface RoomView {
 export const ROOM_HEADER_ENTRY_ID = 'dsh-agent-team-room-header'
 export const ROOM_FOOTER_ENTRY_ID = 'dsh-agent-team-room-footer'
 export const ROOM_NATIVE_API_PREFIX = '/agent-team-room/api/session/'
+export const ROOM_INVITE_PROVIDER_SLOT = 'agent-team-room.invite.provider'
+
+/** Owner props exposed to optional member-source plugins inside the Room invite panel. */
+export interface RoomInviteProviderOwnerProps {
+  sessionId: string
+  roomId: string
+  roomName: string
+  disabled: boolean
+  onAttached: () => void
+}
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    /** Additive, provider-owned member pickers. Room never interprets role or policy data. */
+    'agent-team-room.invite.provider': {
+      kind: 'list'
+      scope: 'session'
+      owner: RoomInviteProviderOwnerProps
+    }
+  }
+}
 
 export type RoomsHeaderActionProps = PropsRuntime<'conversation.session.header.actions'>
 export type RoomsFooterActionProps = PropsRuntime<'sidebar.footer.action'> & SidebarFooterActionOwnerProps
+type RoomsHeaderHostProps = RoomsHeaderActionProps & PropsRenderSlots<typeof ROOM_INVITE_PROVIDER_SLOT>
+type RoomsFooterHostProps = RoomsFooterActionProps & PropsRenderSlots<typeof ROOM_INVITE_PROVIDER_SLOT>
 
 interface RoomsSnapshot {
   rooms: RoomView[]
@@ -61,6 +84,7 @@ interface LauncherProps {
   sessionsState: SessionListState
   wide?: boolean
   location: 'header' | 'footer'
+  renderInviteProviders: (owner: RoomInviteProviderOwnerProps) => ReactNode
 }
 
 type PendingRisk =
@@ -142,7 +166,14 @@ function Empty({ children }: { children: ReactNode }): ReactElement {
   })
 }
 
-function RoomsLauncher({ sessionId, sessions, sessionsState, wide, location }: LauncherProps): ReactElement {
+function RoomsLauncher({
+  sessionId,
+  sessions,
+  sessionsState,
+  wide,
+  location,
+  renderInviteProviders,
+}: LauncherProps): ReactElement {
   const [open, setOpen] = useState(false)
   const [rooms, setRooms] = useState<RoomView[]>([])
   const [selectedId, setSelectedId] = useState<string>()
@@ -524,6 +555,18 @@ function RoomsLauncher({ sessionId, sessions, sessionsState, wide, location }: L
         style: { marginTop: 10, padding: 12, borderRadius: 12, background: color.subtle },
         children: [
           createElement('div', {
+            key: 'providers',
+            'data-room-invite-providers': true,
+            style: { display: 'grid', gap: 8, marginBottom: 10 },
+            children: renderInviteProviders({
+              sessionId: sessionId ?? selected.leaderSessionId,
+              roomId: selected.id,
+              roomName: selected.name,
+              disabled: busy,
+              onAttached: () => { void refresh() },
+            }),
+          }),
+          createElement('div', {
             key: 'title',
             style: { fontWeight: 650, fontSize: 13 },
             children: 'Existing continuable child Sessions',
@@ -720,13 +763,17 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.session.header.actions',
     id: ROOM_HEADER_ENTRY_ID,
     order: 20,
-  }, (props: RoomsHeaderActionProps) => {
+    children: {
+      [ROOM_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+    },
+  }, (props: RoomsHeaderHostProps) => {
     const sessionsState = props.useSessions(value => value)
     return createElement(RoomsLauncher, {
       sessionId: props.sessionId,
       sessions,
       sessionsState,
       location: 'header',
+      renderInviteProviders: owner => props.renderSlot(ROOM_INVITE_PROVIDER_SLOT, owner),
     })
   }))
 
@@ -734,7 +781,10 @@ export function apply(ctx: ClientContext): void {
     name: 'sidebar.footer.action',
     id: ROOM_FOOTER_ENTRY_ID,
     order: 20,
-  }, (props: RoomsFooterActionProps) => {
+    children: {
+      [ROOM_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+    },
+  }, (props: RoomsFooterHostProps) => {
     const sessionsState = props.useSessions(value => value)
     return createElement(RoomsLauncher, {
       sessionId: sessionsState.current,
@@ -742,6 +792,7 @@ export function apply(ctx: ClientContext): void {
       sessionsState,
       wide: props.wide,
       location: 'footer',
+      renderInviteProviders: owner => props.renderSlot(ROOM_INVITE_PROVIDER_SLOT, owner),
     })
   }))
 }
