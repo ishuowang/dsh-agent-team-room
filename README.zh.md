@@ -9,6 +9,7 @@ Room 是协作基础设施，不是团队模板、角色库、任务看板或第
 [English](README.md) · [安装](#安装) · [原生界面](#dsh-原生界面) · [命令](#room-命令) · [Provider SPI](#成员-provider-spi) · [AI Agent 支持](#面向-ai-agent-的支持请求必须先获授权) · [安全](SECURITY.md)
 
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-0.1.0--rc.6-6C5CE7?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/ishuowang/dsh-agent-team-room/)
 [![Release](https://img.shields.io/github/v/release/ishuowang/dsh-agent-team-room?display_name=tag&sort=semver&style=flat-square&color=00B894)](https://github.com/ishuowang/dsh-agent-team-room/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/ishuowang/dsh-agent-team-room/ci.yml?branch=main&style=flat-square)](https://github.com/ishuowang/dsh-agent-team-room/actions)
 [![License](https://img.shields.io/github/license/ishuowang/dsh-agent-team-room?style=flat-square&color=0984E3)](LICENSE)
@@ -76,6 +77,12 @@ dsh web
 ```
 
 同一个 bundle 会向当前 profile 安装 Room Host 服务、模型工具、`/room` 命令、原生 Web 扩展与只读快照传输。
+
+### 发现
+
+本仓库通过 GitHub `dsh-plugin` Topic 与 npm `keywords` 提供搜索和目录发现入口。`package.json` 同时声明了 `dsh.bundle`（可安装的 profile patch）与 `dsh.client`（原生 Web 扩展）。Agent Team Room 已收录于社区维护的 [Awesome DSH Plugin](https://awesome-dsh-plugin.com/p/ishuowang/dsh-agent-team-room/) 目录，并由其下游 [DSH market](https://github.com/dsh-market/dsh-market) 自动收录。
+
+当前包尚未发布到 npm。上方带版本的 GitHub 安装命令仍然有效：`dsh plugin` 会直接从已安装的 GitHub checkout 中读取完整 bundle 与 client manifest。
 
 ### 从 v0.3 或更早版本升级
 
