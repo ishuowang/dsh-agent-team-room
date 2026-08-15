@@ -28,6 +28,25 @@ interface RoomView {
 export declare const ROOM_HEADER_ENTRY_ID = "dsh-agent-team-room-header";
 export declare const ROOM_FOOTER_ENTRY_ID = "dsh-agent-team-room-footer";
 export declare const ROOM_NATIVE_API_PREFIX = "/agent-team-room/api/session/";
+export declare const ROOM_INVITE_PROVIDER_SLOT = "agent-team-room.invite.provider";
+/** Owner props exposed to optional member-source plugins inside the Room invite panel. */
+export interface RoomInviteProviderOwnerProps {
+    sessionId: string;
+    roomId: string;
+    roomName: string;
+    disabled: boolean;
+    onAttached: () => void;
+}
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+    interface SlotMap {
+        /** Additive, provider-owned member pickers. Room never interprets role or policy data. */
+        'agent-team-room.invite.provider': {
+            kind: 'list';
+            scope: 'session';
+            owner: RoomInviteProviderOwnerProps;
+        };
+    }
+}
 export type RoomsHeaderActionProps = PropsRuntime<'conversation.session.header.actions'>;
 export type RoomsFooterActionProps = PropsRuntime<'sidebar.footer.action'> & SidebarFooterActionOwnerProps;
 interface RoomsSnapshot {

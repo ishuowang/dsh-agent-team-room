@@ -51,6 +51,8 @@ flowchart LR
 
 Room 只通过 DSH Web 官方 typed slot `conversation.session.header.actions` 与 `sidebar.footer.action` 扩展界面。两个入口打开同一个原生 `Modal`；对话区、输入框、侧边栏和详情区始终保留并可正常使用。
 
+成员添加区还声明了可选 typed list slot：`agent-team-room.invite.provider`。像 [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) 这样的 bridge 可以在这里提供自己的已验证成员选择器；没有安装任何 provider 时该 slot 不渲染内容，Room 的独立行为完全不变。
+
 <p align="center">
   <img src="assets/native-room.png" width="768" alt="DSH Web 原生 Modal 中的 Agent Team Room 总览">
   <br>
@@ -72,7 +74,7 @@ Modal 可以创建 Room、选择当前 Session 领导或参与的 Room，并通�
 要求：Node.js `^22.19.0 || >=24`，DeepSeek Harness `0.1.0-rc.6`。
 
 ```sh
-dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.4.0
+dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.5.0
 dsh web
 ```
 
@@ -152,6 +154,23 @@ ctx.rooms.registerMemberProvider({
 
 集成层准备好成员后，使用 provider id 和不透明 descriptor 调用 `ctx.rooms.attachMember(...)`。Provider 运行在可信 DSH Host 进程中，应像其他高权限插件一样经过选择与代码审查。Room 会在 provider 开始准备前预留容量；如果成员提交失败，还可以调用 provider 自己提供的 rollback。
 
+对于已经创建好的、可继续的直属 DSH 子 Session，公共便捷 API 也接受可选的 provider-neutral 来源信息：
+
+```ts
+await ctx.rooms.attachSession(parent, roomId, {
+  sessionId: childSessionId,
+  name: 'Reviewer',
+  profile: {
+    apiVersion: 'profiles.example/v1',
+    kind: 'AgentProfile',
+    id: 'reviewer',
+    version: '1.0.0',
+  },
+}, signal)
+```
+
+`profile` 是一个小型、可 JSON 序列化的身份引用，包含 `apiVersion`、`kind`、`id`，以及可选的 `version`/`digest`。Room 会让它走同一 provider 路径，校验并持久化一份脱离调用方的副本，但永远不会把它解释成能力授权。不传 `profile` 的现有 `attachSession` 调用保持不变。
+
 ### 可选 RoleHub 来源信息
 
 Room 不依赖 RoleHub，不发现角色、不安装技能，也不解释角色能力。独立可信 bridge 可以先验证并实例化 RoleHub 角色，再加入生成的成员，同时携带以下来源信息：
@@ -166,7 +185,7 @@ Room 不依赖 RoleHub，不发现角色、不安装技能，也不解释角色�
 }
 ```
 
-Room 只校验字段形状、持久化记录并显示 RoleHub 标记。这是**不参与授权的来源信息**：它不能证明 bundle 可信、不能授予工具，也不能放宽 DSH 权限。角色验证、effective policy、角色 setup 与 Session 创建都属于独立 bridge 和 Host policy。
+独立 bridge 可以把这个对象直接作为 `attachSession(...).profile` 传入。Room 会校验通用身份 envelope 与已识别的 RoleHub 摘要形状、持久化记录并显示 RoleHub 标记。这是**不参与授权的来源信息**：它不能证明 bundle 可信、不能授予工具，也不能放宽 DSH 权限。角色验证、effective policy、角色 setup 与 Session 创建都属于独立 bridge 和 Host policy。
 
 ## 配置
 

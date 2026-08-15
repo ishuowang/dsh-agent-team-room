@@ -2,7 +2,7 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { RoomMemberProvider } from './member-provider.js';
-import { type AttachRoomMemberInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomSummary } from './types.js';
+import { type AttachDshSessionInput, type AttachRoomMemberInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomSummary } from './types.js';
 export * from './types.js';
 export * from './member-provider.js';
 export { RoomStorage, defaultStorageFile } from './storage.js';
@@ -54,10 +54,7 @@ export default class RoomRuntime extends Service {
      * the provider runs, so concurrent invitations cannot orphan extra Sessions.
      */
     attachMember(parent: Agent, roomId: string, input: AttachRoomMemberInput, signal: AbortSignal): Promise<RoomMember>;
-    attachSession(parent: Agent, roomId: string, input: {
-        sessionId: string;
-        name?: string;
-    }, signal: AbortSignal): Promise<RoomMember>;
+    attachSession(parent: Agent, roomId: string, input: AttachDshSessionInput, signal: AbortSignal): Promise<RoomMember>;
     sendMessage(parent: Agent, roomId: string, targetMemberId: string, message: string, signal: AbortSignal): Promise<{
         deliveryId: string;
     }>;

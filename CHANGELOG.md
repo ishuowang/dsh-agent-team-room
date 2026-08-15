@@ -2,6 +2,11 @@
 
 All notable Agent Team Room changes are documented here. Releases follow Semantic Versioning.
 
+## [0.5.0] - 2026-08-15
+
+- Declare the additive `agent-team-room.invite.provider` native UI slot so independent bridges can offer verified member sources inside the existing Room attach panel without changing Room's role-neutral Host runtime.
+- Let the public `attachSession` convenience API carry an optional provider-neutral, JSON-serializable profile reference through the existing provider and persistence path; calls without a profile remain compatible.
+
 ## [0.4.0] - 2026-08-15
 
 ### Changed
@@ -52,6 +57,7 @@ All notable Agent Team Room changes are documented here. Releases follow Semanti
 - Reject non-loopback dashboard clients by default and bound per-room task/event retention.
 - Add bilingual documentation, strict TypeScript checks, tests, and packaging validation.
 
+[0.5.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.1.0...v0.2.0

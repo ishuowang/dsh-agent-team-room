@@ -12,6 +12,7 @@ import {
   ROLEHUB_ROLE_API_VERSION,
   ROOM_SCHEMA_VERSION,
   roomSummary,
+  type AttachDshSessionInput,
   type AttachRoomMemberInput,
   type BroadcastDelivery,
   type Room,
@@ -311,13 +312,14 @@ export default class RoomRuntime extends Service {
   async attachSession(
     parent: Agent,
     roomId: string,
-    input: { sessionId: string; name?: string },
+    input: AttachDshSessionInput,
     signal: AbortSignal,
   ): Promise<RoomMember> {
     return this.attachMember(parent, roomId, {
       providerId: DSH_SESSION_MEMBER_PROVIDER,
       descriptor: { sessionId: input.sessionId },
       ...(input.name ? { name: input.name } : {}),
+      ...(input.profile ? { profile: input.profile } : {}),
     }, signal)
   }
 
