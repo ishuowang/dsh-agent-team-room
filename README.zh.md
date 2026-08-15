@@ -6,7 +6,7 @@
 
 Room 是协作基础设施，不是团队模板、角色库、任务看板或第二套聊天应用。
 
-[English](README.md) · [安装](#安装) · [原生界面](#dsh-原生界面) · [命令](#room-命令) · [Provider SPI](#成员-provider-spi) · [AI Agent 支持](#面向-ai-agent-的支持请求必须先获授权) · [安全](SECURITY.md)
+[English](README.md) · [安装](#安装) · [原生界面](#dsh-原生界面) · [成员提及](#room-成员提及) · [命令](#room-命令) · [Provider SPI](#成员-provider-spi) · [AI Agent 支持](#面向-ai-agent-的支持请求必须先获授权) · [安全](SECURITY.md)
 
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-0.1.0--rc.6-6C5CE7?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/ishuowang/dsh-agent-team-room/)
@@ -51,7 +51,7 @@ flowchart LR
 
 Room 只通过 DSH Web 官方 typed slot `conversation.session.header.actions` 与 `sidebar.footer.action` 扩展界面。两个入口打开同一个原生 `Modal`；对话区、输入框、侧边栏和详情区始终保留并可正常使用。
 
-成员添加区还声明了可选 typed list slot：`agent-team-room.invite.provider`。像 [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) 这样的 bridge 可以在这里提供自己的已验证成员选择器；没有安装任何 provider 时该 slot 不渲染内容，Room 的独立行为完全不变。
+成员添加区为两个原生入口分别声明可选 typed provider seat：兼容旧版的 header key `agent-team-room.invite.provider`，以及 footer key `agent-team-room.invite.provider.footer`。像 [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) 这样的 bridge 可以把同一个已验证成员选择器接到两处；每个 child-slot key 都只声明一次，符合 DSH SlotCore 的约束。没有安装 provider 时这些 seat 不渲染内容，Room 的独立行为完全不变。
 
 <p align="center">
   <img src="assets/native-room.png" width="768" alt="DSH Web 原生 Modal 中的 Agent Team Room 总览">
@@ -67,6 +67,20 @@ Modal 可以创建 Room、选择当前 Session 领导或参与的 Room，并通�
   <sub>使用合成演示 Session 展示成员接入、打开、消息、广播、移出与关闭。</sub>
 </p>
 
+### Room 成员提及
+
+在某个开放 Room 的 Leader Session 中，以 `@` 开始一条原生输入框草稿。Room 会向 DSH 内置 input-trigger 菜单贡献一个 `Room members` 来源，因此搜索、方向键、Enter、Escape、鼠标选择、无障碍语义和光标安全插入都由 DSH 原生实现。
+
+<p align="center">
+  <img src="assets/native-mentions.png" width="768" alt="输入 at 符号后展示 Room 成员候选的原生 DSH 输入框">
+  <br>
+  <sub>使用合成 Room 数据运行的真实 DSH 打包界面。候选详情会标明 Room、生命周期状态与稳定成员身份。</sub>
+</p>
+
+候选仅包含当前 Session 所领导的开放 Room 中尚未移除的成员。即使显示名称重复，选中项仍绑定准确的 Room id 与 member id。提交 `@Mira …` 时，只有后续正文会通过现有、受 Leader 授权的 `/room send` 路径定向投递；它不会广播，不会让 Host 按显示名猜测目标，也不会先把正文交给 Leader 模型。投递时 Host 会重新检查 Room 所有权和成员状态，过期候选会安全失败。
+
+v0.6 的 Room mention 仅在草稿开头生效。行内 `@` 继续留给其他 DSH reference source，避免把普通模型提示静默变成 Room 写操作。
+
 界面通过一个小型同源 `GET` 接口读取字段白名单化的成员快照。该接口不接受写操作，并会省略 provider 地址、profile digest、事件历史、消息正文与 Session 对话记录。所有写操作都会回到 `/room`，由 Host 再次校验 Leader 所有权。
 
 ## 安装
@@ -74,7 +88,7 @@ Modal 可以创建 Room、选择当前 Session 领导或参与的 Room，并通�
 要求：Node.js `^22.19.0 || >=24`，DeepSeek Harness `0.1.0-rc.6`。
 
 ```sh
-dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.5.0
+dsh plugin --profile web add github:ishuowang/dsh-agent-team-room#v0.6.0
 dsh web
 ```
 
@@ -106,6 +120,8 @@ Room 不会创建角色，也不会注入提示词。先通过 DSH 创建一个�
 /room send <room-id> <member-id> --message "Review the release boundary."
 /room broadcast <room-id> --message "Post your current status."
 ```
+
+也可以直接在 Room Leader 的 DSH 原生输入框中键入 `@`，选择一名成员、填写正文并按 Enter。消息会作为定向 Room relay 交给该成员，不经过 Leader 模型。
 
 移出成员会解除 Room 关系，并默认请求 provider 中断其活动工作；关闭 Room 会对其余成员执行同样处理并保留有界元数据历史。这两种操作都不会删除背后的 Session 或传输。
 

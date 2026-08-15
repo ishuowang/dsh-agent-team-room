@@ -2,6 +2,13 @@
 
 All notable Agent Team Room changes are documented here. Releases follow Semantic Versioning.
 
+## [0.6.0] - 2026-08-15
+
+- Add a native, leading `@` Room-member source to DSH's input-trigger pipeline. A picked candidate binds the exact Room/member identity and sends the remaining composer text through `/room send` without prompting the leader model.
+- Restrict mention candidates to non-removed members of open Rooms led by the current Session, with deterministic disambiguation for duplicate labels and Host-side authorization repeated on submit.
+- Preserve quoted command values that begin with `--`, so direct messages such as `--help` round-trip to the selected member instead of being mistaken for a missing flag value.
+- Split the header and footer invite-provider child slots so DSH SlotCore sees one declaration per key, while retaining the original header key for v0.5 bridge compatibility.
+
 ## [0.5.0] - 2026-08-15
 
 - Declare the additive `agent-team-room.invite.provider` native UI slot so independent bridges can offer verified member sources inside the existing Room attach panel without changing Room's role-neutral Host runtime.
@@ -57,6 +64,7 @@ All notable Agent Team Room changes are documented here. Releases follow Semanti
 - Reject non-loopback dashboard clients by default and bound per-room task/event retention.
 - Add bilingual documentation, strict TypeScript checks, tests, and packaging validation.
 
+[0.6.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ishuowang/dsh-agent-team-room/compare/v0.2.0...v0.3.0

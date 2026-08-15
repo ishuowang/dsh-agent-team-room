@@ -26,17 +26,25 @@ const USAGE = [
   '/room close <room-id> [--summary "..."] [--interrupt true|false]',
 ].join('\n')
 
-/** Tokenize command input without invoking a shell or accepting expansion. */
-export function tokenizeRoomCommand(rawInput: string): string[] {
-  const tokens: string[] = []
+interface RoomCommandToken {
+  value: string
+  /** True when quoting or escaping explicitly marked this token as a literal value. */
+  protected: boolean
+}
+
+/** Internal scanner retaining whether a value was explicitly quoted or escaped. */
+function scanRoomCommand(rawInput: string): RoomCommandToken[] {
+  const tokens: RoomCommandToken[] = []
   let token = ''
   let started = false
+  let protectedToken = false
   let quote: '"' | "'" | undefined
   const finish = (): void => {
     if (!started) return
-    tokens.push(token)
+    tokens.push({ value: token, protected: protectedToken })
     token = ''
     started = false
+    protectedToken = false
   }
   for (let index = 0; index < rawInput.length; index += 1) {
     const character = rawInput[index]
@@ -50,6 +58,7 @@ export function tokenizeRoomCommand(rawInput: string): string[] {
       if (escaped === undefined) throw new Error('room: dangling escape at end of input')
       token += escaped
       started = true
+      protectedToken = true
       index += 1
       continue
     }
@@ -57,6 +66,7 @@ export function tokenizeRoomCommand(rawInput: string): string[] {
       if (quote === undefined) {
         quote = character
         started = true
+        protectedToken = true
         continue
       }
       if (quote === character) {
@@ -72,6 +82,11 @@ export function tokenizeRoomCommand(rawInput: string): string[] {
   return tokens
 }
 
+/** Tokenize command input without invoking a shell or accepting expansion. */
+export function tokenizeRoomCommand(rawInput: string): string[] {
+  return scanRoomCommand(rawInput).map(token => token.value)
+}
+
 function nonEmpty(value: string | undefined, field: string): string {
   if (value === undefined || value.trim().length === 0) throw new Error(`room: ${field} is required\n${USAGE}`)
   return value
@@ -84,32 +99,35 @@ function boolean(value: string | undefined, field: string, fallback: boolean): b
   throw new Error(`room: ${field} must be true or false\n${USAGE}`)
 }
 
-function flags(tokens: readonly string[], start: number, allowed: readonly string[]): Map<string, string> {
+function flags(tokens: readonly RoomCommandToken[], start: number, allowed: readonly string[]): Map<string, string> {
   const result = new Map<string, string>()
   for (let index = start; index < tokens.length; index += 2) {
-    const flag = tokens[index]
-    const value = tokens[index + 1]
+    const flag = tokens[index]?.value
+    const valueToken = tokens[index + 1]
     if (flag === undefined || !flag.startsWith('--')) {
       throw new Error(`room: unexpected positional argument "${flag ?? ''}"\n${USAGE}`)
     }
     if (!allowed.includes(flag)) throw new Error(`room: unknown flag "${flag}"\n${USAGE}`)
     if (result.has(flag)) throw new Error(`room: duplicate flag "${flag}"`)
-    if (value === undefined || value.startsWith('--')) throw new Error(`room: flag "${flag}" requires a value`)
+    if (valueToken === undefined || (!valueToken.protected && valueToken.value.startsWith('--'))) {
+      throw new Error(`room: flag "${flag}" requires a value`)
+    }
+    const value = valueToken.value
     result.set(flag, nonEmpty(value, `${flag} value`))
   }
   return result
 }
 
 export function parseRoomCommand(rawInput: string): ParsedRoomCommand {
-  const tokens = tokenizeRoomCommand(rawInput)
-  const action = tokens[0] ?? 'list'
+  const tokens = scanRoomCommand(rawInput)
+  const action = tokens[0]?.value ?? 'list'
   if (action === 'list') {
     const values = flags(tokens, 1, ['--include-closed'])
     return { action, includeClosed: boolean(values.get('--include-closed'), '--include-closed', false) }
   }
   if (action === 'show') {
     if (tokens.length !== 2) throw new Error(`room: show requires exactly one room id\n${USAGE}`)
-    return { action, roomId: nonEmpty(tokens[1], 'room id') }
+    return { action, roomId: nonEmpty(tokens[1]?.value, 'room id') }
   }
   if (action === 'create') {
     const values = flags(tokens, 1, ['--name', '--topic'])
@@ -121,7 +139,7 @@ export function parseRoomCommand(rawInput: string): ParsedRoomCommand {
     }
   }
   if (action === 'attach') {
-    const roomId = nonEmpty(tokens[1], 'room id')
+    const roomId = nonEmpty(tokens[1]?.value, 'room id')
     const values = flags(tokens, 2, ['--session', '--name'])
     const name = values.get('--name')
     return {
@@ -132,24 +150,24 @@ export function parseRoomCommand(rawInput: string): ParsedRoomCommand {
     }
   }
   if (action === 'remove') {
-    const roomId = nonEmpty(tokens[1], 'room id')
-    const memberId = nonEmpty(tokens[2], 'member id')
+    const roomId = nonEmpty(tokens[1]?.value, 'room id')
+    const memberId = nonEmpty(tokens[2]?.value, 'member id')
     const values = flags(tokens, 3, ['--interrupt'])
     return { action, roomId, memberId, interrupt: boolean(values.get('--interrupt'), '--interrupt', true) }
   }
   if (action === 'send') {
-    const roomId = nonEmpty(tokens[1], 'room id')
-    const memberId = nonEmpty(tokens[2], 'member id')
+    const roomId = nonEmpty(tokens[1]?.value, 'room id')
+    const memberId = nonEmpty(tokens[2]?.value, 'member id')
     const values = flags(tokens, 3, ['--message'])
     return { action, roomId, memberId, message: nonEmpty(values.get('--message'), '--message') }
   }
   if (action === 'broadcast') {
-    const roomId = nonEmpty(tokens[1], 'room id')
+    const roomId = nonEmpty(tokens[1]?.value, 'room id')
     const values = flags(tokens, 2, ['--message'])
     return { action, roomId, message: nonEmpty(values.get('--message'), '--message') }
   }
   if (action === 'close') {
-    const roomId = nonEmpty(tokens[1], 'room id')
+    const roomId = nonEmpty(tokens[1]?.value, 'room id')
     const values = flags(tokens, 2, ['--summary', '--interrupt'])
     const summary = values.get('--summary')
     return {

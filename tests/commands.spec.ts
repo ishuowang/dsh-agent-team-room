@@ -89,6 +89,10 @@ describe('parseRoomCommand()', () => {
       { action: 'send', roomId: 'room-1', memberId: 'member-1', message: 'Check this change' },
     ],
     [
+      "send room-1 member-1 --message '--help'",
+      { action: 'send', roomId: 'room-1', memberId: 'member-1', message: '--help' },
+    ],
+    [
       'broadcast room-1 --message "Status update"',
       { action: 'broadcast', roomId: 'room-1', message: 'Status update' },
     ],
@@ -114,6 +118,7 @@ describe('parseRoomCommand()', () => {
     ['create --topic topic', /--name is required/u],
     ['create --name one --name two', /duplicate flag "--name"/u],
     ['create --name', /flag "--name" requires a value/u],
+    ['create --name --topic', /flag "--name" requires a value/u],
     ['attach room-1', /--session is required/u],
     ['attach room-1 --unknown value', /unknown flag "--unknown"/u],
     ['remove room-1', /member id is required/u],
