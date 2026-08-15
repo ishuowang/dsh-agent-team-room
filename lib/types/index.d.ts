@@ -1,10 +1,10 @@
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import { type CreateRoomFromTemplateInput, type RoomTemplate, type RoomTemplateCreationResult } from './templates.js';
-import { type AddAgentInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomSummary, type RoomTask, type WaitResult } from './types.js';
+import type { RoomMemberProvider } from './member-provider.js';
+import { type AttachRoomMemberInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomSummary } from './types.js';
 export * from './types.js';
-export * from './templates.js';
+export * from './member-provider.js';
 export { RoomStorage, defaultStorageFile } from './storage.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -12,94 +12,81 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export interface Config {
-    /** Continuable subagent provider used for newly created room members. */
-    provider: string;
     /** JSON persistence path. Empty uses $DSH_HOME/agent-team-room/rooms.json. */
     storageFile?: string;
-    /** Hard room membership ceiling, including the leader. */
+    /** Hard membership ceiling, including the leader and in-flight reservations. */
     maxMembersPerRoom: number;
-    /** Maximum direct/broadcast/task instruction length. */
+    /** Maximum direct/broadcast message length. */
     maxMessageChars: number;
-    /** Maximum assistant result text persisted in room state. */
-    maxResultChars: number;
-    /** Maximum retained events per room. Oldest events are discarded first. */
+    /** Maximum retained metadata events per room. Oldest events are discarded first. */
     maxEventsPerRoom: number;
-    /** Maximum tracked tasks retained in one room. */
-    maxTasksPerRoom: number;
 }
 export declare const Config: z<Config>;
-/** Durable room coordinator exposed as ctx.rooms. */
+/** Thin durable Room coordinator exposed as ctx.rooms. */
 export default class RoomRuntime extends Service {
     private readonly config;
     static inject: string[];
     static Config: z<Config>;
     private readonly storage;
     private readonly roomsById;
+    private readonly providers;
+    private readonly reservations;
+    private readonly busyRooms;
     private readonly listeners;
     private persistQueue;
     constructor(ctx: Context, config: Config);
     [Service.init](): Promise<void>;
     subscribe(listener: (roomId: string) => void): () => void;
+    /** Register one trusted Host-side member transport. Duplicate ids fail closed. */
+    registerMemberProvider(provider: RoomMemberProvider): () => void;
+    listMemberProviders(): string[];
     createRoom(parent: Agent, input: {
         name: string;
-        objective: string;
-        template?: {
-            id: string;
-            name: string;
-            version: number;
-        };
+        topic?: string;
     }): Promise<Room>;
-    /** Return detached built-in templates for host commands, tools, and other adapters. */
-    listRoomTemplates(): RoomTemplate[];
-    /** Resolve one detached built-in template by its stable id. */
-    getRoomTemplate(templateId: string): RoomTemplate;
-    /**
-     * Expand one template into an ordinary durable room and independent child Sessions.
-     * Capacity is checked before the first write. If a later spawn fails, the traceable
-     * partial room is closed instead of pretending that already-created Sessions rolled back.
-     */
-    createRoomFromTemplate(parent: Agent, input: CreateRoomFromTemplateInput, signal: AbortSignal): Promise<RoomTemplateCreationResult>;
     listRooms(parent: Agent, includeClosed?: boolean): RoomSummary[];
-    /** Dashboard-only inventory. It contains no storage path or hidden Agent transcript. */
-    listAllRooms(includeClosed?: boolean): RoomSummary[];
+    /** Read-only native UI projection for rooms in which one Session participates. */
+    listRoomsForSession(sessionId: string, includeClosed?: boolean): Room[];
     getRoom(parent: Agent, roomId: string): Room;
-    getRoomForDashboard(roomId: string): Room;
     roomHistory(parent: Agent, roomId: string, limit?: number): RoomEvent[];
-    getTask(parent: Agent, roomId: string, taskId: string): RoomTask;
-    addAgent(parent: Agent, roomId: string, input: AddAgentInput, signal: AbortSignal): Promise<RoomMember>;
-    sendMessage(parent: Agent, roomId: string, targetAgentId: string, message: string, signal: AbortSignal): Promise<{
-        messageId: string;
+    /**
+     * Prepare and commit one provider-backed member. Capacity is reserved before
+     * the provider runs, so concurrent invitations cannot orphan extra Sessions.
+     */
+    attachMember(parent: Agent, roomId: string, input: AttachRoomMemberInput, signal: AbortSignal): Promise<RoomMember>;
+    attachSession(parent: Agent, roomId: string, input: {
+        sessionId: string;
+        name?: string;
+    }, signal: AbortSignal): Promise<RoomMember>;
+    sendMessage(parent: Agent, roomId: string, targetMemberId: string, message: string, signal: AbortSignal): Promise<{
+        deliveryId: string;
     }>;
     broadcast(parent: Agent, roomId: string, message: string, signal: AbortSignal): Promise<BroadcastDelivery[]>;
-    assignTask(parent: Agent, roomId: string, input: {
-        assigneeAgentId: string;
-        title: string;
-        instructions: string;
-    }, signal: AbortSignal): Promise<RoomTask>;
-    completeTask(reporter: Agent, roomId: string, taskId: string, input: {
-        status: 'completed' | 'failed';
-        report: string;
-    }): Promise<RoomTask>;
-    removeAgent(parent: Agent, roomId: string, agentId: string, interruptRunning?: boolean): Promise<RoomMember>;
+    removeMember(parent: Agent, roomId: string, memberId: string, interruptRunning?: boolean): Promise<RoomMember>;
     closeRoom(parent: Agent, roomId: string, input: {
         summary?: string;
         interruptRunning?: boolean;
     }): Promise<Room>;
-    waitForTasks(parent: Agent, roomId: string, taskIds: readonly string[] | undefined, timeoutMs: number, signal: AbortSignal): Promise<WaitResult>;
-    private followup;
+    private dshSessionProvider;
+    private requiredProvider;
     private room;
     private ownedRoom;
     private openOwnedRoom;
-    private activeAgentMember;
-    private assertMemberCapacity;
+    private leader;
+    private activeMember;
+    private acquireRoomOperation;
+    private releaseRoomOperation;
+    private reserve;
+    private releaseReservation;
     private appendEvent;
-    private cancelMemberTask;
     private copy;
     private changed;
+    private notify;
     private persist;
     private recoverInterruptedState;
     private trimLoadedEvents;
     private onSubagentStart;
     private onSubagentEnd;
+    private updateDshMemberLifecycle;
 }
 //# sourceMappingURL=index.d.ts.map

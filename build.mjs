@@ -1,10 +1,12 @@
 /** Build the Node host modules and the single-file DSH Web client bundle. */
 
 import { execFileSync } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { build } from 'esbuild'
 
 const tsc = 'node_modules/.bin/tsc'
 
+rmSync('lib', { recursive: true, force: true })
 execFileSync(tsc, ['-p', 'tsconfig.build.json'], { stdio: 'inherit' })
 execFileSync(tsc, ['-p', 'tsconfig.client.json'], { stdio: 'inherit' })
 

@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-team-room",
-  "version": "0.3.0",
-  "description": "Native DSH multi-agent rooms with built-in company, research, coding, support, incident, and content teams.",
+  "version": "0.4.0",
+  "description": "Native DSH rooms for connecting independent sessions and provider-backed AI members without bundled roles or scenarios.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -18,9 +18,9 @@
       "types": "./lib/types/commands.d.ts",
       "default": "./lib/commands.js"
     },
-    "./dashboard": {
-      "types": "./lib/types/dashboard.d.ts",
-      "default": "./lib/dashboard.js"
+    "./native-api": {
+      "types": "./lib/types/native-api.d.ts",
+      "default": "./lib/native-api.js"
     },
     "./client": {
       "types": "./lib/types/client/index.d.ts",
@@ -45,10 +45,9 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-input-trigger",
-        "@deepseek-ai/dsh-client-ui-commands"
+        "@deepseek-ai/dsh-client-ui-sidebar"
       ]
     }
   },
@@ -67,11 +66,10 @@
     "dsh-plugin",
     "multi-agent",
     "agent-orchestration",
-    "agent-team",
     "agent-room",
-    "multi-agent-templates",
-    "one-person-company",
-    "deep-research"
+    "session-room",
+    "rolehub",
+    "native-ui"
   ],
   "license": "MIT",
   "author": "ishuowang <ishuowang@qq.com>",
@@ -96,9 +94,8 @@
     "@deepseek-ai/dsh-subagent": "0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-commands": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-input-trigger": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.6",
@@ -111,13 +108,10 @@
     "@deepseek-ai/dsh-client-runtime": {
       "optional": true
     },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-client-ui-layout": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-ui-commands": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-ui-input-trigger": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-primitives": {
@@ -144,9 +138,8 @@
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
     "@types/node": "^24.0.0",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-commands": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-input-trigger": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.6",

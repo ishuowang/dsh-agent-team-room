@@ -5,21 +5,9 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   apply,
   inject,
-  parseRoomTemplateCommand,
+  parseRoomCommand,
+  tokenizeRoomCommand,
 } from '../src/commands.js'
-
-const template = {
-  id: 'research-build-review',
-  version: 1,
-  name: 'Research, Build & Review',
-  description: 'Investigate, implement, and independently review one outcome.',
-  defaultObjective: 'Deliver a researched and reviewed implementation.',
-  roles: [
-    { id: 'researcher', name: 'Researcher', role: 'Gather evidence' },
-    { id: 'builder', name: 'Builder', role: 'Implement the result' },
-    { id: 'reviewer', name: 'Reviewer', role: 'Review independently' },
-  ],
-}
 
 function invocation(rawInput: string, signal = new AbortController().signal): CommandInvocation {
   return {
@@ -30,24 +18,17 @@ function invocation(rawInput: string, signal = new AbortController().signal): Co
   }
 }
 
-function mount(overrides: Record<string, unknown> = {}): {
-  definition: CommandDefinition
-  rooms: {
-    listRoomTemplates: ReturnType<typeof vi.fn>
-    getRoomTemplate: ReturnType<typeof vi.fn>
-    createRoomFromTemplate: ReturnType<typeof vi.fn>
-  }
-} {
+function mount(overrides: Record<string, unknown> = {}) {
   let definition: CommandDefinition | undefined
   const rooms = {
-    listRoomTemplates: vi.fn(() => [structuredClone(template)]),
-    getRoomTemplate: vi.fn(() => structuredClone(template)),
-    createRoomFromTemplate: vi.fn(async () => ({
-      template: structuredClone(template),
-      room: { id: 'room-1', name: 'Research Crew', status: 'open' },
-      members: [{ agentId: 'agent-1' }, { agentId: 'agent-2' }, { agentId: 'agent-3' }],
-      failures: [],
-    })),
+    listRooms: vi.fn(() => [{ id: 'room-1', name: 'Build room' }]),
+    getRoom: vi.fn(() => ({ id: 'room-1', name: 'Build room' })),
+    createRoom: vi.fn(async () => ({ id: 'room-1', name: 'Build room' })),
+    attachSession: vi.fn(async () => ({ memberId: 'member-1', name: 'Reviewer' })),
+    removeMember: vi.fn(async () => ({ memberId: 'member-1', status: 'removed' })),
+    sendMessage: vi.fn(async () => ({ delivered: true, memberId: 'member-1' })),
+    broadcast: vi.fn(async () => [{ delivered: true, memberId: 'member-1' }]),
+    closeRoom: vi.fn(async () => ({ id: 'room-1', status: 'closed' })),
     ...overrides,
   }
   apply({
@@ -59,7 +40,7 @@ function mount(overrides: Record<string, unknown> = {}): {
     },
     rooms,
   } as unknown as Context)
-  if (definition === undefined) throw new Error('room-template command was not registered')
+  if (!definition) throw new Error('/room command was not registered')
   return { definition, rooms }
 }
 
@@ -67,156 +48,185 @@ async function run(definition: CommandDefinition, rawInput: string, signal?: Abo
   return await definition.handler(invocation(rawInput, signal))
 }
 
-describe('parseRoomTemplateCommand()', () => {
-  it.each([
-    ['', { action: 'list' }],
-    ['   ', { action: 'list' }],
-    [' list ', { action: 'list' }],
-    ['show research-build-review', { action: 'show', templateId: 'research-build-review' }],
-  ])('parses %j', (input, expected) => {
-    expect(parseRoomTemplateCommand(input)).toEqual(expected)
+describe('tokenizeRoomCommand()', () => {
+  it('preserves quoted values and handles escaped characters without shell expansion', () => {
+    expect(tokenizeRoomCommand(String.raw`create --name 'Release crew' --topic escaped\ value`)).toEqual([
+      'create',
+      '--name',
+      'Release crew',
+      '--topic',
+      'escaped value',
+    ])
   })
 
-  it('parses every create override while preserving quoted content', () => {
-    expect(parseRoomTemplateCommand(
-      'create research-build-review --name "Release Crew" --objective "Ship a reviewed build" '
-      + '--provider spawn --model-provider openai --model "gpt-5.6 sol"',
-    )).toEqual({
-      action: 'create',
-      templateId: 'research-build-review',
-      name: 'Release Crew',
-      objective: 'Ship a reviewed build',
-      provider: 'spawn',
-      modelProvider: 'openai',
-      model: 'gpt-5.6 sol',
-    })
+  it.each([
+    ['create --name "unfinished', /unterminated/u],
+    ['create --name trailing\\', /dangling escape/u],
+  ])('rejects malformed quoting in %j', (input, expected) => {
+    expect(() => tokenizeRoomCommand(input)).toThrow(expected)
+  })
+})
+
+describe('parseRoomCommand()', () => {
+  it.each([
+    ['', { action: 'list', includeClosed: false }],
+    [' list --include-closed true ', { action: 'list', includeClosed: true }],
+    ['show room-1', { action: 'show', roomId: 'room-1' }],
+    [
+      'create --name "Release crew" --topic "Ship the native Room"',
+      { action: 'create', name: 'Release crew', topic: 'Ship the native Room' },
+    ],
+    [
+      'attach room-1 --session child-1 --name Reviewer',
+      { action: 'attach', roomId: 'room-1', sessionId: 'child-1', name: 'Reviewer' },
+    ],
+    [
+      'remove room-1 member-1 --interrupt false',
+      { action: 'remove', roomId: 'room-1', memberId: 'member-1', interrupt: false },
+    ],
+    [
+      'send room-1 member-1 --message "Check this change"',
+      { action: 'send', roomId: 'room-1', memberId: 'member-1', message: 'Check this change' },
+    ],
+    [
+      'broadcast room-1 --message "Status update"',
+      { action: 'broadcast', roomId: 'room-1', message: 'Status update' },
+    ],
+    [
+      'close room-1 --summary "Finished" --interrupt false',
+      { action: 'close', roomId: 'room-1', summary: 'Finished', interrupt: false },
+    ],
+  ])('parses %j', (input, expected) => {
+    expect(parseRoomCommand(input)).toEqual(expected)
+  })
+
+  it('applies safe defaults to destructive lifecycle flags', () => {
+    expect(parseRoomCommand('remove room-1 member-1')).toMatchObject({ interrupt: true })
+    expect(parseRoomCommand('close room-1')).toMatchObject({ interrupt: true })
   })
 
   it.each([
     ['wat', /unknown action "wat"/u],
-    ['list extra', /list accepts no arguments/u],
-    ['show', /show requires a template id/u],
-    ['show one two', /show accepts exactly one/u],
-    ['create', /create requires a template id/u],
-    ['create --name crew', /template id before any flags/u],
-    ['create sample --wat value', /unknown flag "--wat"/u],
-    ['create sample --name one --name two', /duplicate flag "--name"/u],
-    ['create sample --name', /flag "--name" requires a value/u],
-    ['create sample --name --model x', /flag "--name" requires a value/u],
-    ['create sample extra', /unexpected positional argument "extra"/u],
-    ['create sample --name="Crew"', /unknown flag "--name=Crew"/u],
-    ['create sample --name ""', /--name value cannot be empty/u],
-    ['create sample --name "unfinished', /unterminated/u],
-    ['create sample --name trailing\\', /dangling escape/u],
+    ['list extra', /unexpected positional argument "extra"/u],
+    ['list --include-closed maybe', /must be true or false/u],
+    ['show', /show requires exactly one room id/u],
+    ['show one two', /show requires exactly one room id/u],
+    ['create --topic topic', /--name is required/u],
+    ['create --name one --name two', /duplicate flag "--name"/u],
+    ['create --name', /flag "--name" requires a value/u],
+    ['attach room-1', /--session is required/u],
+    ['attach room-1 --unknown value', /unknown flag "--unknown"/u],
+    ['remove room-1', /member id is required/u],
+    ['send room-1 member-1', /--message is required/u],
+    ['broadcast room-1 --message ""', /--message value is required/u],
+    ['close room-1 --interrupt yes', /must be true or false/u],
   ])('rejects invalid syntax %j', (input, expected) => {
-    expect(() => parseRoomTemplateCommand(input)).toThrow(expected)
+    expect(() => parseRoomCommand(input)).toThrow(expected)
   })
 })
 
-describe('room-template Host command', () => {
-  it('registers one independently injectable Host command and treats bare input as list', async () => {
+describe('/room Host command', () => {
+  it('registers the generic command and treats bare input as list', async () => {
     const { definition, rooms } = mount()
+    const call = invocation('')
 
     expect(inject).toEqual(['commands', 'rooms'])
     expect(definition).toMatchObject({
-      name: 'room-template',
-      description: expect.any(String),
-      input: { hint: expect.stringContaining('create <id>') },
+      name: 'room',
+      description: expect.stringContaining('attached DSH Sessions'),
+      input: { hint: expect.stringContaining('attach') },
     })
-    await expect(run(definition, '')).resolves.toMatchObject({
+    await expect(definition.handler(call)).resolves.toMatchObject({
       kind: 'success',
-      text: expect.stringContaining('research-build-review'),
+      text: expect.stringContaining('Build room'),
     })
-    expect(rooms.listRoomTemplates).toHaveBeenCalledOnce()
+    expect(rooms.listRooms).toHaveBeenCalledExactlyOnceWith(call.agent, false)
   })
 
-  it('renders a template without creating a room', async () => {
+  it('routes read commands without mutating Room state', async () => {
     const { definition, rooms } = mount()
+    const call = invocation('show room-1')
 
-    const result = await run(definition, ' show research-build-review')
-
-    expect(result).toMatchObject({
+    await expect(definition.handler(call)).resolves.toMatchObject({
       kind: 'success',
-      text: expect.stringContaining('Default objective:'),
+      text: expect.stringContaining('room-1'),
     })
-    expect(result.text).toContain('Reviewer — Review independently')
-    expect(rooms.getRoomTemplate).toHaveBeenCalledWith('research-build-review')
-    expect(rooms.createRoomFromTemplate).not.toHaveBeenCalled()
+    expect(rooms.getRoom).toHaveBeenCalledExactlyOnceWith(call.agent, 'room-1')
+    expect(rooms.createRoom).not.toHaveBeenCalled()
+    expect(rooms.attachSession).not.toHaveBeenCalled()
+    expect(rooms.removeMember).not.toHaveBeenCalled()
+    expect(rooms.sendMessage).not.toHaveBeenCalled()
+    expect(rooms.broadcast).not.toHaveBeenCalled()
+    expect(rooms.closeRoom).not.toHaveBeenCalled()
   })
 
-  it('passes the exact calling Agent, overrides, and cancellation signal to the Room runtime', async () => {
+  it('passes the exact calling Agent and cancellation signal to create/attach/send operations', async () => {
     const { definition, rooms } = mount()
     const controller = new AbortController()
-    const call = invocation(
-      ' create research-build-review --name "Release Crew" --objective "Ship it" '
-      + '--provider local --model-provider openai --model gpt-5.6',
+    const create = invocation('create --name "Release crew" --topic "Ship it"', controller.signal)
+    const attach = invocation('attach room-1 --session child-1 --name Reviewer', controller.signal)
+    const send = invocation('send room-1 member-1 --message "Please review"', controller.signal)
+
+    await definition.handler(create)
+    await definition.handler(attach)
+    await definition.handler(send)
+
+    expect(rooms.createRoom).toHaveBeenCalledExactlyOnceWith(create.agent, {
+      name: 'Release crew',
+      topic: 'Ship it',
+    })
+    expect(rooms.attachSession).toHaveBeenCalledExactlyOnceWith(attach.agent, 'room-1', {
+      sessionId: 'child-1',
+      name: 'Reviewer',
+    }, controller.signal)
+    expect(rooms.sendMessage).toHaveBeenCalledExactlyOnceWith(
+      send.agent,
+      'room-1',
+      'member-1',
+      'Please review',
       controller.signal,
     )
-
-    const result = await definition.handler(call)
-
-    expect(result).toEqual({
-      kind: 'success',
-      text: [
-        'Room "Research Crew" created from research-build-review.',
-        'Room id: room-1',
-        'Agents started: 3/3',
-      ].join('\n'),
-    })
-    expect(rooms.createRoomFromTemplate).toHaveBeenCalledWith(call.agent, {
-      templateId: 'research-build-review',
-      name: 'Release Crew',
-      objective: 'Ship it',
-      provider: 'local',
-      modelProvider: 'openai',
-      model: 'gpt-5.6',
-    }, controller.signal)
   })
 
-  it('returns a traceable error result for partial provisioning failures', async () => {
-    const { definition } = mount({
-      createRoomFromTemplate: vi.fn(async () => ({
-        template: structuredClone(template),
-        room: { id: 'room-partial', name: 'Partial Crew', status: 'closed' },
-        members: [{ agentId: 'agent-1' }],
-        failures: [{ roleId: 'builder', name: 'Builder', error: 'provider unavailable' }],
-      })),
+  it('routes remove, broadcast, and close with explicit lifecycle options', async () => {
+    const { definition, rooms } = mount()
+    const remove = invocation('remove room-1 member-1 --interrupt false')
+    const broadcast = invocation('broadcast room-1 --message "Status update"')
+    const close = invocation('close room-1 --summary Done --interrupt false')
+
+    await definition.handler(remove)
+    await definition.handler(broadcast)
+    await definition.handler(close)
+
+    expect(rooms.removeMember).toHaveBeenCalledExactlyOnceWith(remove.agent, 'room-1', 'member-1', false)
+    expect(rooms.broadcast).toHaveBeenCalledExactlyOnceWith(
+      broadcast.agent,
+      'room-1',
+      'Status update',
+      broadcast.signal,
+    )
+    expect(rooms.closeRoom).toHaveBeenCalledExactlyOnceWith(close.agent, 'room-1', {
+      summary: 'Done',
+      interruptRunning: false,
     })
-
-    const result = await run(definition, 'create research-build-review')
-
-    expect(result.kind).toBe('error')
-    expect(result.text).toContain('Room id: room-partial')
-    expect(result.text).toContain('Agents started: 1/3')
-    expect(result.text).toContain('Builder (builder): provider unavailable')
-    expect(result.text).toContain('partial room remains available for inspection')
   })
 
-  it('turns parser, lookup, runtime, and cancellation failures into CommandResult errors', async () => {
-    const lookupFailure = mount({
-      getRoomTemplate: vi.fn(() => { throw new Error('unknown template missing') }),
+  it('turns parser, runtime, and pre-dispatch cancellation failures into error results', async () => {
+    const runtime = mount({
+      createRoom: vi.fn(async () => { throw new Error('storage unavailable') }),
     }).definition
-    await expect(run(lookupFailure, 'show missing')).resolves.toEqual({
+    await expect(run(runtime, 'create --name Crew')).resolves.toEqual({
       kind: 'error',
-      text: 'unknown template missing',
+      text: 'storage unavailable',
     })
-
-    const runtimeFailure = mount({
-      createRoomFromTemplate: vi.fn(async () => { throw new Error('provider exploded') }),
-    }).definition
-    await expect(run(runtimeFailure, 'create research-build-review')).resolves.toEqual({
-      kind: 'error',
-      text: 'provider exploded',
-    })
-
-    await expect(run(runtimeFailure, 'create sample --unknown x')).resolves.toMatchObject({
+    await expect(run(runtime, 'create --unknown value')).resolves.toMatchObject({
       kind: 'error',
       text: expect.stringContaining('unknown flag "--unknown"'),
     })
 
     const controller = new AbortController()
     controller.abort(new Error('operator cancelled'))
-    await expect(run(runtimeFailure, 'list', controller.signal)).resolves.toEqual({
+    await expect(run(runtime, 'list', controller.signal)).resolves.toEqual({
       kind: 'error',
       text: 'operator cancelled',
     })

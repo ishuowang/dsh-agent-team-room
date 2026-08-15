@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -6,14 +6,20 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {
-  ContinuableStartSpec,
   SubagentFollowupOptions,
   SubagentInterruptAuthority,
   SubagentListEntry,
   SubagentRunEndInfo,
+  SubagentRunInfo,
 } from '@deepseek-ai/dsh-subagent'
 import { afterEach, describe, expect, it } from 'vitest'
-import RoomRuntime, { type Config } from '../src/index.js'
+import RoomRuntime, {
+  DSH_SESSION_MEMBER_PROTOCOL,
+  DSH_SESSION_MEMBER_PROVIDER,
+  ROLEHUB_ROLE_API_VERSION,
+  type Config,
+  type RoomMemberProvider,
+} from '../src/index.js'
 
 interface FollowupCall {
   parent: Agent
@@ -23,23 +29,14 @@ interface FollowupCall {
 }
 
 class FakeSubagents extends Service {
-  readonly starts: ContinuableStartSpec[] = []
   readonly followups: FollowupCall[] = []
   readonly interrupts: Array<{ childId: string; authority: SubagentInterruptAuthority }> = []
   children: SubagentListEntry[] = []
-  nextChild = 1
-  failStartAt: number | undefined
   failFollowup: Error | undefined
+  listedParentId: string | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'subagents')
-  }
-
-  async startContinuable(spec: ContinuableStartSpec): Promise<{ childId: SessionId; messageId: MessageId }> {
-    this.starts.push(spec)
-    if (this.failStartAt === this.starts.length) throw new Error('spawn unavailable')
-    const childId = SessionId(`child-${this.nextChild++}`)
-    return { childId, messageId: `initial-${childId}` as MessageId }
   }
 
   async followup(
@@ -53,7 +50,8 @@ class FakeSubagents extends Service {
     return `followup-${this.followups.length}` as MessageId
   }
 
-  async listChildren(_parentId: SessionId, _signal?: AbortSignal): Promise<SubagentListEntry[]> {
+  async listChildren(parentId: SessionId, _signal?: AbortSignal): Promise<SubagentListEntry[]> {
+    this.listedParentId = parentId
     return structuredClone(this.children)
   }
 
@@ -69,10 +67,58 @@ interface Harness {
   storageFile: string
 }
 
+interface Deferred<T> {
+  promise: Promise<T>
+  resolve(value: T): void
+  reject(error: unknown): void
+}
+
 const temporaryDirectories: string[] = []
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept
+    reject = decline
+  })
+  return { promise, resolve, reject }
+}
 
 function leader(id = 'leader-1'): Agent {
   return { id } as unknown as Agent
+}
+
+function signal(): AbortSignal {
+  return new AbortController().signal
+}
+
+function child(id: string, activity: 'running' | 'inactive' = 'inactive'): SubagentListEntry {
+  return {
+    kind: 'child',
+    id: SessionId(id),
+    activity,
+    hasChildren: false,
+    mode: 'continuable',
+    label: `Session ${id}`,
+  }
+}
+
+function startInfo(childId: string): SubagentRunInfo {
+  return {
+    runId: 'run-1' as SubagentRunInfo['runId'],
+    provider: 'fake-provider',
+    id: SessionId(childId),
+    local: true,
+  }
+}
+
+function endInfo(childId: string, stopReason: 'completed' | 'error'): SubagentRunEndInfo {
+  return {
+    ...startInfo(childId),
+    stopReason,
+    lastAssistantMessage: [{ type: 'text', text: 'private child output' }],
+  }
 }
 
 async function createHarness(storageFile?: string, overrides: Partial<Config> = {}): Promise<Harness> {
@@ -85,403 +131,496 @@ async function createHarness(storageFile?: string, overrides: Partial<Config> = 
   const context = new Context()
   const subagents = new FakeSubagents(context)
   const runtime = new RoomRuntime(context, {
-    provider: 'fake-provider',
     storageFile: file,
     maxMembersPerRoom: 4,
     maxMessageChars: 2_000,
-    maxResultChars: 2_000,
     maxEventsPerRoom: 10_000,
-    maxTasksPerRoom: 2_000,
     ...overrides,
   })
   await runtime[Service.init]()
   return { context, runtime, subagents, storageFile: file }
 }
 
-function endInfo(childId: string, stopReason: 'completed' | 'error', text = 'done'): SubagentRunEndInfo {
-  return {
-    runId: 'run-1' as SubagentRunEndInfo['runId'],
-    provider: 'fake-provider',
-    id: SessionId(childId),
-    local: true,
-    stopReason,
-    lastAssistantMessage: [{ type: 'text', text }],
-  }
-}
-
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })))
 })
 
-describe('RoomRuntime ownership and membership', () => {
-  it('creates a detached persistent room and enforces leader ownership', async () => {
+describe('RoomRuntime ownership and provider SPI', () => {
+  it('creates an owned room, exposes detached copies, and keeps other leaders out', async () => {
     const { runtime } = await createHarness()
     const owner = leader()
     const outsider = leader('leader-2')
 
-    const created = await runtime.createRoom(owner, { name: '  Release crew  ', objective: '  Ship the plugin  ' })
+    const created = await runtime.createRoom(owner, { name: '  Release room  ', topic: '  Ship safely  ' })
 
     expect(created).toMatchObject({
-      name: 'Release crew',
-      objective: 'Ship the plugin',
-      leaderAgentId: owner.id,
+      schemaVersion: 2,
+      name: 'Release room',
+      topic: 'Ship safely',
+      leaderSessionId: owner.id,
       status: 'open',
       revision: 1,
     })
-    expect(created.members).toEqual([expect.objectContaining({ agentId: owner.id, kind: 'leader', status: 'leader' })])
-    expect(created.events).toEqual([expect.objectContaining({ type: 'room.created', actorAgentId: owner.id })])
-    expect(runtime.listRooms(owner)).toHaveLength(1)
+    expect(created.members).toEqual([
+      expect.objectContaining({
+        kind: 'leader',
+        name: 'Leader',
+        status: 'leader',
+        connection: {
+          providerId: DSH_SESSION_MEMBER_PROVIDER,
+          protocol: DSH_SESSION_MEMBER_PROTOCOL,
+          address: { sessionId: owner.id },
+          sessionId: owner.id,
+        },
+      }),
+    ])
+    expect(created.events).toEqual([
+      expect.objectContaining({
+        type: 'room.created',
+        actorMemberId: created.members[0]!.memberId,
+      }),
+    ])
+    expect(runtime.listRooms(owner)).toEqual([
+      expect.objectContaining({ id: created.id, memberCount: 1, leaderSessionId: owner.id }),
+    ])
     expect(runtime.listRooms(outsider)).toEqual([])
+    expect(runtime.listRoomsForSession(owner.id)).toHaveLength(1)
     expect(() => runtime.getRoom(outsider, created.id)).toThrow('caller does not lead room')
 
     created.name = 'caller mutation'
-    expect(runtime.getRoom(owner, created.id).name).toBe('Release crew')
+    created.members[0]!.name = 'caller mutation'
+    expect(runtime.getRoom(owner, created.id)).toMatchObject({
+      name: 'Release room',
+      members: [expect.objectContaining({ name: 'Leader' })],
+    })
   })
 
-  it('starts a new independent child and validates existing direct children', async () => {
-    const { runtime, subagents } = await createHarness()
+  it('keeps durable mutations committed when an observer throws', async () => {
+    const { runtime, storageFile } = await createHarness()
     const owner = leader()
-    const room = await runtime.createRoom(owner, { name: 'Builders', objective: 'Implement the feature' })
-
-    const created = await runtime.addAgent(owner, room.id, {
-      name: '  Ada  ',
-      role: '  Runtime engineer  ',
-      modelProvider: 'test-llm',
-      model: 'test-model',
-      systemPrompt: 'Be exact.',
-    }, new AbortController().signal)
-
-    expect(created).toMatchObject({
-      agentId: 'child-1',
-      name: 'Ada',
-      role: 'Runtime engineer',
-      provider: 'fake-provider',
-      model: 'test-model',
-      status: 'working',
-    })
-    expect(subagents.starts).toHaveLength(1)
-    expect(subagents.starts[0]).toMatchObject({
-      provider: 'fake-provider',
-      label: 'Builders: Ada',
-      request: { agentOptions: { provider: 'test-llm', model: 'test-model' }, persona: 'Be exact.' },
-    })
-    expect(subagents.starts[0]!.request.prompt[0]).toMatchObject({
-      type: 'text',
-      text: expect.stringContaining('Room objective: Implement the feature'),
+    runtime.subscribe(() => {
+      throw new Error('broken observer')
     })
 
-    subagents.children = [{
-      kind: 'child',
-      id: SessionId('existing-child'),
-      activity: 'inactive',
-      hasChildren: false,
-      mode: 'continuable',
-      label: 'Existing',
-    }]
-    await expect(runtime.addAgent(owner, room.id, {
-      agentId: 'existing-child',
-      name: 'Grace',
-      role: 'Reviewer',
-    }, new AbortController().signal)).resolves.toMatchObject({
-      agentId: 'existing-child',
-      provider: 'existing',
+    const room = await runtime.createRoom(owner, { name: 'Observable room' })
+
+    expect(runtime.getRoom(owner, room.id).name).toBe('Observable room')
+    expect(await readFile(storageFile, 'utf8')).toContain(room.id)
+  })
+
+  it('registers a provider, preserves trusted provenance, and rolls back an invalid profile', async () => {
+    const { runtime } = await createHarness()
+    const owner = leader()
+    const room = await runtime.createRoom(owner, { name: 'Provider room' })
+    const rollbacks: string[] = []
+    const provider: RoomMemberProvider = {
+      id: 'remote-session',
+      attach: async ({ descriptor, requestedName, requestedProfile }) => ({
+        name: requestedName || 'Remote member',
+        connection: {
+          protocol: 'remote.session/v1',
+          address: descriptor,
+        },
+        ...(requestedProfile ? { profile: requestedProfile } : {}),
+        initialStatus: 'idle',
+        rollback: async () => { rollbacks.push('rolled back') },
+      }),
+      deliver: async () => ({ deliveryId: 'delivery-1' }),
+    }
+
+    const unregister = runtime.registerMemberProvider(provider)
+    expect(runtime.listMemberProviders()).toEqual([DSH_SESSION_MEMBER_PROVIDER, 'remote-session'])
+    expect(() => runtime.registerMemberProvider(provider)).toThrow('already registered')
+
+    const profile = {
+      apiVersion: ROLEHUB_ROLE_API_VERSION,
+      kind: 'AgentRole' as const,
+      id: 'reviewer',
+      version: '1.2.0',
+      digest: `sha256:${'a'.repeat(64)}` as const,
+    }
+    const attached = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { endpoint: 'remote://reviewer' },
+      name: '  Reviewer  ',
+      profile,
+    }, signal())
+
+    expect(attached).toMatchObject({
+      kind: 'member',
+      name: 'Reviewer',
+      status: 'idle',
+      connection: {
+        providerId: 'remote-session',
+        protocol: 'remote.session/v1',
+        address: { endpoint: 'remote://reviewer' },
+      },
+      profile,
     })
-    await expect(runtime.addAgent(owner, room.id, {
-      agentId: 'not-a-child',
-      name: 'Mallory',
-      role: 'Intruder',
-    }, new AbortController().signal)).rejects.toThrow('not a continuable direct child')
+    expect(runtime.listRooms(owner)[0]).toMatchObject({ memberCount: 2, roleHubMemberCount: 1 })
+
+    await expect(runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { endpoint: 'remote://invalid-role' },
+      profile: {
+        apiVersion: ROLEHUB_ROLE_API_VERSION,
+        kind: 'AgentRole',
+        id: 'invalid',
+        version: '1.0.0',
+        digest: 'sha256:not-a-digest',
+      },
+    }, signal())).rejects.toThrow('RoleHub digest')
+    expect(rollbacks).toEqual(['rolled back'])
+
+    unregister()
+    unregister()
+    expect(runtime.listMemberProviders()).toEqual([DSH_SESSION_MEMBER_PROVIDER])
+    await expect(runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: {},
+    }, signal())).rejects.toThrow('provider remote-session is unavailable')
   })
 })
 
-describe('RoomRuntime scenario templates', () => {
-  it('expands a built-in template into an ordinary room of independent child Sessions', async () => {
-    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 16 })
+describe('RoomRuntime DSH Session membership and messaging', () => {
+  it('attaches only a continuable direct child and relays with coordinator metadata', async () => {
+    const { runtime, subagents } = await createHarness()
     const owner = leader()
-    const template = runtime.getRoomTemplate('software-delivery')
+    const room = await runtime.createRoom(owner, { name: 'Session room' })
+    subagents.children = [
+      child('existing-child', 'running'),
+      {
+        kind: 'child',
+        id: SessionId('one-shot-child'),
+        activity: 'inactive',
+        hasChildren: false,
+        mode: 'one-shot',
+      },
+    ]
 
-    const created = await runtime.createRoomFromTemplate(owner, {
-      templateId: template.id,
-      name: 'Release train',
-      objective: 'Ship the next release safely',
-      modelProvider: 'test-llm',
-      model: 'test-model',
-    }, new AbortController().signal)
+    const member = await runtime.attachSession(owner, room.id, {
+      sessionId: 'existing-child',
+      name: '  Existing session  ',
+    }, signal())
 
-    expect(created.failures).toEqual([])
-    expect(created.members).toHaveLength(template.roles.length)
-    expect(created.room).toMatchObject({
-      name: 'Release train',
-      objective: 'Ship the next release safely',
-      status: 'open',
-      template: { id: template.id, name: template.name, version: template.version },
+    expect(subagents.listedParentId).toBe(owner.id)
+    expect(member).toMatchObject({
+      name: 'Existing session',
+      status: 'working',
+      connection: {
+        providerId: DSH_SESSION_MEMBER_PROVIDER,
+        protocol: DSH_SESSION_MEMBER_PROTOCOL,
+        address: { sessionId: 'existing-child' },
+        sessionId: 'existing-child',
+      },
     })
-    expect(subagents.starts).toHaveLength(template.roles.length)
-    expect(subagents.starts.every(start =>
-      start.request.agentOptions?.provider === 'test-llm'
-      && start.request.agentOptions.model === 'test-model')).toBe(true)
-    expect(created.room.members.filter(member => member.kind === 'agent').map(member => member.name))
-      .toEqual(template.roles.map(role => role.name))
-  })
+    await expect(runtime.attachSession(owner, room.id, {
+      sessionId: 'one-shot-child',
+    }, signal())).rejects.toThrow('not a continuable direct child')
+    await expect(runtime.attachSession(owner, room.id, {
+      sessionId: 'not-a-child',
+    }, signal())).rejects.toThrow('not a continuable direct child')
+    await expect(runtime.attachSession(owner, room.id, {
+      sessionId: 'existing-child',
+    }, signal())).rejects.toThrow('is already in room')
 
-  it('checks template capacity before creating a room or starting a child', async () => {
-    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 4 })
-    const owner = leader()
-
-    await expect(runtime.createRoomFromTemplate(owner, {
-      templateId: 'opc',
-    }, new AbortController().signal)).rejects.toThrow('maxMembersPerRoom is 4')
-
-    expect(runtime.listRooms(owner, true)).toEqual([])
-    expect(subagents.starts).toEqual([])
-  })
-
-  it('closes and retains a traceable partial room when a later member cannot start', async () => {
-    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 16 })
-    const owner = leader()
-    subagents.failStartAt = 2
-
-    const result = await runtime.createRoomFromTemplate(owner, {
-      templateId: 'plan-execute-review',
-    }, new AbortController().signal)
-
-    expect(result.members).toHaveLength(1)
-    expect(result.failures).toEqual([
-      expect.objectContaining({ error: 'spawn unavailable' }),
-    ])
-    expect(result.room).toMatchObject({
-      status: 'closed',
-      summary: expect.stringContaining('spawn unavailable'),
-    })
-    expect(runtime.listRooms(owner)).toEqual([])
-    expect(runtime.listRooms(owner, true)).toEqual([
+    await expect(runtime.sendMessage(owner, room.id, member.memberId, 'Review this change', signal()))
+      .resolves.toEqual({ deliveryId: 'followup-1' })
+    expect(subagents.followups).toEqual([
       expect.objectContaining({
-        id: result.room.id,
-        status: 'closed',
-        template: expect.objectContaining({ id: 'plan-execute-review' }),
+        parent: owner,
+        childId: 'existing-child',
+        content: [{ type: 'text', text: 'Review this change' }],
+        options: expect.objectContaining({
+          source: { kind: 'coordinator', form: 'relay', senderSessionId: owner.id },
+        }),
       }),
     ])
-    expect(subagents.interrupts).toHaveLength(1)
   })
 
-  it('honors cancellation before writing any template state', async () => {
-    const { runtime, subagents } = await createHarness(undefined, { maxMembersPerRoom: 16 })
+  it('delivers direct and broadcast messages without retaining their contents in metadata or storage', async () => {
+    const { runtime, storageFile } = await createHarness()
     const owner = leader()
-    const controller = new AbortController()
-    controller.abort(new Error('cancelled by user'))
+    const room = await runtime.createRoom(owner, { name: 'Private relay' })
+    const delivered: Array<{ endpoint: string; message: string }> = []
+    const provider: RoomMemberProvider = {
+      id: 'private-relay',
+      attach: async ({ descriptor }) => {
+        const endpoint = (descriptor as { endpoint: string }).endpoint
+        return {
+          name: endpoint,
+          connection: { protocol: 'private.relay/v1', address: { endpoint } },
+        }
+      },
+      deliver: async ({ member, message }) => {
+        const endpoint = (member.connection.address as { endpoint: string }).endpoint
+        delivered.push({ endpoint, message })
+        if (endpoint === 'broken') throw new Error('remote unavailable')
+        return { deliveryId: `${endpoint}-${delivered.length}` }
+      },
+    }
+    runtime.registerMemberProvider(provider)
+    const ready = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { endpoint: 'ready' },
+    }, signal())
+    const broken = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { endpoint: 'broken' },
+    }, signal())
+    const directSecret = 'DIRECT_SECRET_DO_NOT_PERSIST'
+    const broadcastSecret = 'BROADCAST_SECRET_DO_NOT_PERSIST'
 
-    await expect(runtime.createRoomFromTemplate(owner, {
-      templateId: 'deep-research',
-    }, controller.signal)).rejects.toThrow('cancelled by user')
-    expect(runtime.listRooms(owner, true)).toEqual([])
-    expect(subagents.starts).toEqual([])
+    await expect(runtime.sendMessage(owner, room.id, ready.memberId, directSecret, signal()))
+      .resolves.toEqual({ deliveryId: 'ready-1' })
+    await expect(runtime.broadcast(owner, room.id, broadcastSecret, signal())).resolves.toEqual([
+      expect.objectContaining({ memberId: ready.memberId, deliveryId: 'ready-2' }),
+      expect.objectContaining({ memberId: broken.memberId, error: 'remote unavailable' }),
+    ])
+
+    expect(delivered).toEqual([
+      { endpoint: 'ready', message: directSecret },
+      { endpoint: 'ready', message: broadcastSecret },
+      { endpoint: 'broken', message: broadcastSecret },
+    ])
+    const updated = runtime.getRoom(owner, room.id)
+    expect(updated.members.find(candidate => candidate.memberId === ready.memberId)?.status).toBe('working')
+    expect(updated.members.find(candidate => candidate.memberId === broken.memberId)?.status).toBe('error')
+    expect(updated.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'message.direct', message: 'Message delivered to ready' }),
+      expect.objectContaining({ type: 'message.broadcast', message: 'Broadcast delivered to 2 member(s)' }),
+    ]))
+    expect(JSON.stringify(updated)).not.toContain(directSecret)
+    expect(JSON.stringify(updated)).not.toContain(broadcastSecret)
+    const persisted = await readFile(storageFile, 'utf8')
+    expect(persisted).not.toContain(directSecret)
+    expect(persisted).not.toContain(broadcastSecret)
   })
 })
 
-describe('RoomRuntime task lifecycle', () => {
-  it('requires an explicit correlated task report and ignores unrelated subagent turns', async () => {
-    const { context, runtime, subagents } = await createHarness()
+describe('RoomRuntime concurrency, removal, and closure', () => {
+  it('prevents close or removal from racing an in-flight delivery', async () => {
+    const { runtime } = await createHarness()
     const owner = leader()
-    const room = await runtime.createRoom(owner, { name: 'Delivery', objective: 'Deliver a result' })
-    const member = await runtime.addAgent(owner, room.id, {
-      name: 'Worker',
-      role: 'Implementer',
-    }, new AbortController().signal)
+    const room = await runtime.createRoom(owner, { name: 'Serialized delivery room' })
+    const gate = deferred<{ deliveryId: string }>()
+    const provider: RoomMemberProvider = {
+      id: 'delayed-delivery',
+      attach: async () => ({
+        name: 'Delayed member',
+        connection: { protocol: 'delayed/v1', address: { id: 'delayed' } },
+      }),
+      deliver: async () => gate.promise,
+    }
+    runtime.registerMemberProvider(provider)
+    const member = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { id: 'delayed' },
+    }, signal())
 
-    const assigned = await runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: '  Build tests  ',
-      instructions: '  Cover the lifecycle  ',
-    }, new AbortController().signal)
+    const pending = runtime.sendMessage(owner, room.id, member.memberId, 'Deliver once', signal())
+    await expect(runtime.removeMember(owner, room.id, member.memberId)).rejects.toThrow('mutation in progress')
+    await expect(runtime.closeRoom(owner, room.id, {})).rejects.toThrow('mutation in progress')
 
-    expect(assigned).toMatchObject({
-      title: 'Build tests',
-      instructions: 'Cover the lifecycle',
-      status: 'running',
-      messageId: 'followup-1',
-    })
-    expect(subagents.followups[0]!.content[0]).toMatchObject({
-      type: 'text',
-      text: expect.stringContaining(`task_id "${assigned.id}"`),
-    })
-    await expect(runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'Second task',
-      instructions: 'Must wait',
-    }, new AbortController().signal)).rejects.toThrow('already owns active task')
-
-    const waiting = runtime.waitForTasks(owner, room.id, [assigned.id], 1_000, new AbortController().signal)
-    await context.parallel('subagent/end', endInfo(member.agentId, 'completed', 'Unrelated queued message finished.'))
-    await expect(runtime.waitForTasks(owner, room.id, [assigned.id], 0, new AbortController().signal)).resolves.toMatchObject({
-      completed: false,
-      timedOut: true,
-      tasks: [expect.objectContaining({ status: 'running' })],
-    })
-    await expect(runtime.completeTask(leader(member.agentId), room.id, assigned.id, {
-      status: 'completed',
-      report: 'All checks passed.',
-    })).resolves.toMatchObject({ status: 'completed', result: 'All checks passed.' })
-
-    await expect(waiting).resolves.toMatchObject({
-      completed: true,
-      timedOut: false,
-      tasks: [expect.objectContaining({ status: 'completed', result: 'All checks passed.' })],
-    })
-    const updated = runtime.getRoom(owner, room.id)
-    expect(updated.members.find(item => item.agentId === member.agentId)).toMatchObject({
-      status: 'idle',
-      lastResult: 'All checks passed.',
-    })
-    expect(updated.events.at(-1)).toMatchObject({ type: 'task.completed', taskId: assigned.id })
-
-    await expect(runtime.completeTask(leader('different-child'), room.id, assigned.id, {
-      status: 'completed',
-      report: 'spoofed',
-    })).rejects.toThrow('not an active room member')
-    await expect(runtime.completeTask(leader(member.agentId), room.id, assigned.id, {
-      status: 'completed',
-      report: 'safe retry',
-    })).resolves.toMatchObject({ status: 'completed', result: 'All checks passed.' })
+    gate.resolve({ deliveryId: 'delayed-1' })
+    await expect(pending).resolves.toEqual({ deliveryId: 'delayed-1' })
+    const closed = await runtime.closeRoom(owner, room.id, {})
+    expect(closed.status).toBe('closed')
+    expect(closed.events.at(-1)?.type).toBe('room.closed')
   })
 
-  it('marks delivery failures terminal and supports immediate timeout snapshots', async () => {
-    const { runtime, subagents } = await createHarness()
+  it('reserves capacity before asynchronous provider work and releases it after settlement', async () => {
+    const { runtime } = await createHarness(undefined, { maxMembersPerRoom: 2 })
     const owner = leader()
-    const room = await runtime.createRoom(owner, { name: 'Failures', objective: 'Expose errors' })
-    const member = await runtime.addAgent(owner, room.id, {
-      name: 'Worker',
-      role: 'Implementer',
-    }, new AbortController().signal)
-    subagents.failFollowup = new Error('transport unavailable')
+    const room = await runtime.createRoom(owner, { name: 'Capacity room' })
+    const gate = deferred<Awaited<ReturnType<RoomMemberProvider['attach']>>>()
+    let attachCalls = 0
+    const provider: RoomMemberProvider = {
+      id: 'slow-provider',
+      attach: async () => {
+        attachCalls += 1
+        return gate.promise
+      },
+      deliver: async () => ({ deliveryId: 'delivered' }),
+    }
+    runtime.registerMemberProvider(provider)
 
-    const failed = await runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'Undeliverable',
-      instructions: 'This will fail',
-    }, new AbortController().signal)
+    const first = runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { id: 1 },
+    }, signal())
+    expect(attachCalls).toBe(1)
+    await expect(runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { id: 2 },
+    }, signal())).rejects.toThrow('room member limit 2 reached')
+    expect(attachCalls).toBe(1)
 
-    expect(failed).toMatchObject({ status: 'failed', error: 'Error: transport unavailable' })
-    await expect(runtime.waitForTasks(owner, room.id, [failed.id], 0, new AbortController().signal)).resolves.toMatchObject({
-      completed: true,
-      timedOut: false,
+    gate.resolve({
+      name: 'Only member',
+      connection: { protocol: 'slow/v1', address: { id: 1 } },
     })
+    const attached = await first
+    await runtime.removeMember(owner, room.id, attached.memberId, false)
 
-    subagents.failFollowup = undefined
-    const running = await runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'Still running',
-      instructions: 'Do not settle yet',
-    }, new AbortController().signal)
-    await expect(runtime.waitForTasks(owner, room.id, [running.id], 0, new AbortController().signal)).resolves.toMatchObject({
-      completed: false,
-      timedOut: true,
-    })
-    await expect(runtime.waitForTasks(owner, room.id, ['missing-task'], 0, new AbortController().signal))
-      .rejects.toThrow('unknown task missing-task')
+    const replacementProvider: RoomMemberProvider = {
+      id: 'replacement-provider',
+      attach: async () => ({
+        name: 'Replacement',
+        connection: { protocol: 'replacement/v1', address: { id: 2 } },
+      }),
+      deliver: async () => ({ deliveryId: 'replacement-delivery' }),
+    }
+    runtime.registerMemberProvider(replacementProvider)
+    await expect(runtime.attachMember(owner, room.id, {
+      providerId: replacementProvider.id,
+      descriptor: { id: 2 },
+    }, signal())).resolves.toMatchObject({ name: 'Replacement' })
   })
 
-  it('closes a room, cancels active tasks, ignores late lifecycle events, and blocks later writes', async () => {
-    const { context, runtime, subagents } = await createHarness()
+  it('runs provider rollback if the room closes after preparation but before commit', async () => {
+    const { runtime } = await createHarness()
     const owner = leader()
-    const room = await runtime.createRoom(owner, { name: 'Closable', objective: 'Finish cleanly' })
-    const member = await runtime.addAgent(owner, room.id, {
-      name: 'Worker',
-      role: 'Implementer',
-    }, new AbortController().signal)
-    const task = await runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'In flight',
-      instructions: 'Await closure',
-    }, new AbortController().signal)
+    const room = await runtime.createRoom(owner, { name: 'Rollback room' })
+    const gate = deferred<Awaited<ReturnType<RoomMemberProvider['attach']>>>()
+    let rollbackCalls = 0
+    const provider: RoomMemberProvider = {
+      id: 'prepared-provider',
+      attach: async () => gate.promise,
+      deliver: async () => ({ deliveryId: 'unused' }),
+    }
+    runtime.registerMemberProvider(provider)
 
-    const closed = await runtime.closeRoom(owner, room.id, { summary: '  Work archived  ' })
+    const pending = runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { id: 'prepared' },
+    }, signal())
+    await runtime.closeRoom(owner, room.id, {})
+    gate.resolve({
+      name: 'Prepared member',
+      connection: { protocol: 'prepared/v1', address: { id: 'prepared' } },
+      rollback: async () => { rollbackCalls += 1 },
+    })
 
-    expect(closed).toMatchObject({ status: 'closed', summary: 'Work archived' })
-    expect(closed.tasks.find(item => item.id === task.id)).toMatchObject({ status: 'cancelled', error: 'Room closed' })
-    expect(closed.members.find(item => item.agentId === member.agentId)).toMatchObject({ status: 'interrupted' })
-    expect(subagents.interrupts).toEqual([
-      expect.objectContaining({ childId: member.agentId, authority: { kind: 'ancestor', agent: owner } }),
-    ])
-    const eventCount = closed.events.length
-    await context.parallel('subagent/end', endInfo(member.agentId, 'error', 'late interrupt result'))
-    expect(runtime.getRoom(owner, room.id).members.find(item => item.agentId === member.agentId))
-      .toMatchObject({ status: 'interrupted' })
-    expect(runtime.getRoom(owner, room.id).events).toHaveLength(eventCount)
-    await expect(runtime.sendMessage(
-      owner,
-      room.id,
-      member.agentId,
-      'too late',
-      new AbortController().signal,
-    )).rejects.toThrow('is closed')
+    await expect(pending).rejects.toThrow(`room ${room.id} is closed`)
+    expect(rollbackCalls).toBe(1)
+    expect(runtime.getRoom(owner, room.id).members).toHaveLength(1)
+  })
+
+  it('removes members, interrupts active transports, and closes the room atomically', async () => {
+    const { runtime } = await createHarness()
+    const owner = leader()
+    const room = await runtime.createRoom(owner, { name: 'Closable room' })
+    const interrupted: string[] = []
+    let next = 0
+    const provider: RoomMemberProvider = {
+      id: 'interruptible',
+      attach: async () => {
+        const id = `remote-${++next}`
+        return {
+          name: id,
+          connection: { protocol: 'interruptible/v1', address: { id } },
+        }
+      },
+      deliver: async () => ({ deliveryId: 'delivery' }),
+      interrupt: async ({ member }) => { interrupted.push(member.name) },
+    }
+    runtime.registerMemberProvider(provider)
+    const first = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: {},
+    }, signal())
+    const second = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: {},
+    }, signal())
+
+    const removed = await runtime.removeMember(owner, room.id, first.memberId)
+    expect(removed.status).toBe('removed')
+    expect(interrupted).toEqual(['remote-1'])
+    await expect(runtime.sendMessage(owner, room.id, first.memberId, 'too late', signal()))
+      .rejects.toThrow('is not active')
+
+    const closed = await runtime.closeRoom(owner, room.id, { summary: '  Archived cleanly  ' })
+    expect(closed).toMatchObject({ status: 'closed', summary: 'Archived cleanly' })
+    expect(closed.members.find(candidate => candidate.memberId === first.memberId)?.status).toBe('removed')
+    expect(closed.members.find(candidate => candidate.memberId === second.memberId)?.status).toBe('interrupted')
+    expect(interrupted).toEqual(['remote-1', 'remote-2'])
     expect(runtime.listRooms(owner)).toEqual([])
     expect(runtime.listRooms(owner, true)).toHaveLength(1)
+    await expect(runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: {},
+    }, signal())).rejects.toThrow('is closed')
+    await expect(runtime.closeRoom(owner, room.id, {})).rejects.toThrow('is closed')
   })
 
-  it('validates a close summary before interrupting agents or mutating room state', async () => {
-    const { runtime, subagents } = await createHarness()
+  it('never persists provider interrupt details when detaching a member', async () => {
+    const { runtime, storageFile } = await createHarness()
     const owner = leader()
-    const room = await runtime.createRoom(owner, { name: 'Atomic close', objective: 'Remain open on invalid input' })
-    await runtime.addAgent(owner, room.id, {
-      name: 'Worker',
-      role: 'Implementer',
-    }, new AbortController().signal)
+    const room = await runtime.createRoom(owner, { name: 'Private interrupt room' })
+    const secret = 'https://provider.invalid/interrupt?token=DO_NOT_PERSIST'
+    const provider: RoomMemberProvider = {
+      id: 'private-interrupt',
+      attach: async () => ({
+        name: 'Private member',
+        connection: { protocol: 'private/v1', address: { id: 'private' } },
+      }),
+      deliver: async () => ({ deliveryId: 'unused' }),
+      interrupt: async () => { throw new Error(secret) },
+    }
+    runtime.registerMemberProvider(provider)
+    const member = await runtime.attachMember(owner, room.id, {
+      providerId: provider.id,
+      descriptor: { id: 'private' },
+    }, signal())
 
-    await expect(runtime.closeRoom(owner, room.id, { summary: 'x'.repeat(2_001) }))
-      .rejects.toThrow('summary exceeds 2000 characters')
-    expect(runtime.getRoom(owner, room.id).status).toBe('open')
-    expect(subagents.interrupts).toEqual([])
+    await expect(runtime.removeMember(owner, room.id, member.memberId)).resolves.toMatchObject({ status: 'removed' })
+    expect(JSON.stringify(runtime.getRoom(owner, room.id))).not.toContain(secret)
+    expect(await readFile(storageFile, 'utf8')).not.toContain(secret)
   })
+})
 
-  it('bounds the retained room timeline and rejects tasks beyond the configured ceiling', async () => {
-    const { runtime } = await createHarness(undefined, { maxEventsPerRoom: 3, maxTasksPerRoom: 1 })
+describe('RoomRuntime DSH lifecycle recovery', () => {
+  it('tracks DSH child starts and settlements without persisting child output', async () => {
+    const { context, runtime, subagents, storageFile } = await createHarness()
     const owner = leader()
-    const room = await runtime.createRoom(owner, { name: 'Bounded', objective: 'Bound persistent growth' })
-    const member = await runtime.addAgent(owner, room.id, {
-      name: 'Worker',
-      role: 'Implementer',
-    }, new AbortController().signal)
-    const first = await runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'Only task',
-      instructions: 'Finish once',
-    }, new AbortController().signal)
-    await runtime.completeTask(leader(member.agentId), room.id, first.id, {
-      status: 'completed',
-      report: 'done',
+    const room = await runtime.createRoom(owner, { name: 'Lifecycle room' })
+    subagents.children = [child('lifecycle-child')]
+    const member = await runtime.attachSession(owner, room.id, { sessionId: 'lifecycle-child' }, signal())
+
+    await context.parallel('subagent/start', startInfo('lifecycle-child'))
+    expect(runtime.getRoom(owner, room.id).members.find(candidate => candidate.memberId === member.memberId)?.status)
+      .toBe('working')
+    expect(runtime.getRoom(owner, room.id).events.at(-1)).toMatchObject({
+      type: 'member.started',
+      targetMemberId: member.memberId,
     })
 
-    expect(runtime.getRoom(owner, room.id).events).toHaveLength(3)
-    await expect(runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'Too many',
-      instructions: 'Exceeds retained task limit',
-    }, new AbortController().signal)).rejects.toThrow('room task limit 1 reached')
+    await context.parallel('subagent/end', endInfo('lifecycle-child', 'completed'))
+    expect(runtime.getRoom(owner, room.id).members.find(candidate => candidate.memberId === member.memberId)?.status)
+      .toBe('idle')
+    await context.parallel('subagent/end', endInfo('lifecycle-child', 'error'))
+    expect(runtime.getRoom(owner, room.id).members.find(candidate => candidate.memberId === member.memberId)?.status)
+      .toBe('error')
+    expect(await readFile(storageFile, 'utf8')).not.toContain('private child output')
   })
 
-  it('recovers persisted in-flight work after a harness restart', async () => {
+  it('recovers persisted working members to idle after a Harness restart', async () => {
     const first = await createHarness()
     const owner = leader()
-    const room = await first.runtime.createRoom(owner, { name: 'Recovery', objective: 'Survive restart' })
-    const member = await first.runtime.addAgent(owner, room.id, {
-      name: 'Worker',
-      role: 'Implementer',
-    }, new AbortController().signal)
-    const task = await first.runtime.assignTask(owner, room.id, {
-      assigneeAgentId: member.agentId,
-      title: 'Interrupted',
-      instructions: 'Running during restart',
-    }, new AbortController().signal)
+    const room = await first.runtime.createRoom(owner, { name: 'Recovery room' })
+    first.subagents.children = [child('recovering-child')]
+    const member = await first.runtime.attachSession(owner, room.id, { sessionId: 'recovering-child' }, signal())
+    await first.context.parallel('subagent/start', startInfo('recovering-child'))
 
     const second = await createHarness(first.storageFile)
     const recovered = second.runtime.getRoom(owner, room.id)
 
-    expect(recovered.members.find(item => item.agentId === member.agentId)).toMatchObject({ status: 'idle' })
-    expect(recovered.members.find(item => item.agentId === member.agentId)).not.toHaveProperty('activeTaskId')
-    expect(recovered.tasks.find(item => item.id === task.id)).toMatchObject({
-      status: 'failed',
-      error: expect.stringContaining('Harness restarted'),
+    expect(recovered.members.find(candidate => candidate.memberId === member.memberId)?.status).toBe('idle')
+    expect(recovered.events.at(-1)).toMatchObject({
+      type: 'system.recovered',
+      message: 'Recovered member state after Harness restart',
     })
-    expect(recovered.events.at(-1)).toMatchObject({ type: 'system.recovered' })
   })
 })
