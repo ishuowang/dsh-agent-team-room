@@ -301,6 +301,13 @@ describe('RoomRuntime DSH Session membership and messaging', () => {
     const member = await runtime.attachSession(owner, room.id, {
       sessionId: 'existing-child',
       name: '  Existing session  ',
+      profile: {
+        apiVersion: ROLEHUB_ROLE_API_VERSION,
+        kind: 'AgentRole',
+        id: 'io.github.example/reviewer',
+        version: '1.2.3',
+        digest: `sha256:${'d'.repeat(64)}`,
+      },
     }, signal())
 
     expect(subagents.listedParentId).toBe(owner.id)
@@ -313,7 +320,17 @@ describe('RoomRuntime DSH Session membership and messaging', () => {
         address: { sessionId: 'existing-child' },
         sessionId: 'existing-child',
       },
+      profile: {
+        apiVersion: ROLEHUB_ROLE_API_VERSION,
+        kind: 'AgentRole',
+        id: 'io.github.example/reviewer',
+        version: '1.2.3',
+        digest: `sha256:${'d'.repeat(64)}`,
+      },
     })
+    expect(runtime.getRoom(owner, room.id).members).toContainEqual(
+      expect.objectContaining({ memberId: member.memberId, profile: member.profile }),
+    )
     await expect(runtime.attachSession(owner, room.id, {
       sessionId: 'one-shot-child',
     }, signal())).rejects.toThrow('not a continuable direct child')

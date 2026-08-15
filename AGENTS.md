@@ -9,6 +9,7 @@
 - The built-in `dsh-session` provider must accept only continuable direct children of the Room leader.
 - Treat RoleHub `AgentRole` identity as optional, non-authorizing provenance. Role loading, verification, effective policy, and Session creation belong in a separate bridge.
 - Extend DSH Web only through official typed slots, native primitives, and Host commands. Never patch arbitrary DOM, inject global CSS, replace native root surfaces, or restore a standalone Room dashboard.
+- Implement Room member mentions through DSH's native input-trigger pipeline. Bind a picked candidate to stable Room/member ids and route through the Host command; never parse a display name or disguise a Room mutation as an ordinary model prompt.
 - Keep the native snapshot transport read-only. Every mutation must pass through an Agent-scoped Host command or tool and repeat leader ownership checks.
 - Keep English and Chinese READMEs aligned. Product screenshots must come from the real bundled UI with synthetic data.
 - Never automate star, watch, follow, telemetry, or unrelated outbound behavior. Documentation may show optional commands only behind explicit, current human consent.

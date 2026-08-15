@@ -49,16 +49,27 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
 
 import {
   ROOM_FOOTER_ENTRY_ID,
+  ROOM_FOOTER_INVITE_PROVIDER_SLOT,
   ROOM_HEADER_ENTRY_ID,
+  ROOM_INVITE_PROVIDER_SLOT,
+  ROOM_MENTION_SOURCE_NAME,
   ROOM_NATIVE_API_PREFIX,
   apply,
+  createRoomMentionSource,
   inject,
   loadRoomSnapshot,
+  roomMentionCandidates,
   roomSnapshotUrl,
 } from '../src/client/index.js'
+import { parseRoomCommand } from '../src/commands.js'
 
 interface RegisteredEntry {
-  registration: { name: string; id: string; order: number }
+  registration: {
+    name: string
+    id: string
+    order: number
+    children?: Record<string, { kind: string; scope: string }>
+  }
   component: (props: Record<string, unknown>) => FakeElement
 }
 
@@ -69,22 +80,33 @@ function clientHarness() {
     return () => undefined
   })
   const injectSlot = vi.fn((_name: string, callback: () => unknown) => callback())
-  const sessions = {}
+  const registerSource = vi.fn((_source: unknown) => () => undefined)
+  const sessions = { binding: vi.fn() }
   const context = {
+    effect: vi.fn((callback: () => unknown) => callback()),
     slots: { inject: injectSlot, register },
     get: vi.fn((name: string) => {
       if (name === 'sessions') return sessions
+      if (name === 'inputTriggers') return { registerSource }
       throw new Error(`unexpected service: ${name}`)
     }),
   }
-  return { context, entries, register, injectSlot }
+  return { context, entries, register, injectSlot, registerSource, sessions }
 }
 
 function renderLauncher(entry: RegisteredEntry, location: 'header' | 'footer'): FakeElement {
   const state = { current: 'leader-1', subagentsByParent: {} }
   const ownerProps = location === 'header'
-    ? { sessionId: 'leader-1', useSessions: (selector: (value: typeof state) => unknown) => selector(state) }
-    : { wide: true, useSessions: (selector: (value: typeof state) => unknown) => selector(state) }
+    ? {
+        sessionId: 'leader-1',
+        useSessions: (selector: (value: typeof state) => unknown) => selector(state),
+        renderSlot: () => null,
+      }
+    : {
+        wide: true,
+        useSessions: (selector: (value: typeof state) => unknown) => selector(state),
+        renderSlot: () => null,
+      }
   const launcher = entry.component(ownerProps)
   if (typeof launcher.type !== 'function') throw new Error('slot contribution did not return the Room launcher')
   return launcher.type(launcher.props) as FakeElement
@@ -109,9 +131,275 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+const mentionSnapshot = {
+  rooms: [
+    {
+      id: 'room-alpha/one',
+      name: 'Release Room',
+      leaderSessionId: 'leader-1',
+      status: 'open' as const,
+      members: [
+        {
+          memberId: 'leader-member',
+          kind: 'leader' as const,
+          name: 'Leader',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'leader-1' },
+          status: 'leader' as const,
+        },
+        {
+          memberId: 'member-alex-111111',
+          kind: 'member' as const,
+          name: 'Alex',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'child-1' },
+          status: 'idle' as const,
+        },
+        {
+          memberId: 'member-alex-222222',
+          kind: 'member' as const,
+          name: 'Alex',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'child-2' },
+          status: 'working' as const,
+        },
+        {
+          memberId: 'member-self',
+          kind: 'member' as const,
+          name: 'Self alias',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'leader-1' },
+          status: 'idle' as const,
+        },
+        {
+          memberId: 'member-mira-333333',
+          kind: 'member' as const,
+          name: 'Mira',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'child-mira' },
+          status: 'idle' as const,
+        },
+        {
+          memberId: 'member-removed',
+          kind: 'member' as const,
+          name: 'Removed',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'child-3' },
+          status: 'removed' as const,
+        },
+      ],
+    },
+    {
+      id: 'room-design',
+      name: 'Design Room',
+      leaderSessionId: 'leader-1',
+      status: 'open' as const,
+      members: [
+        {
+          memberId: 'member-alex-444444',
+          kind: 'member' as const,
+          name: 'Alex',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'child-alex-design' },
+          status: 'interrupted' as const,
+        },
+        {
+          memberId: 'member-lin-555555',
+          kind: 'member' as const,
+          name: 'Lin',
+          connection: { protocol: 'dsh.session/v1', sessionId: 'child-lin' },
+          status: 'working' as const,
+        },
+      ],
+    },
+    {
+      id: 'room-foreign',
+      name: 'Foreign Room',
+      leaderSessionId: 'someone-else',
+      status: 'open' as const,
+      members: [{
+        memberId: 'member-foreign',
+        kind: 'member' as const,
+        name: 'Foreign member',
+        connection: { protocol: 'dsh.session/v1', sessionId: 'child-foreign' },
+        status: 'idle' as const,
+      }],
+    },
+    {
+      id: 'room-closed',
+      name: 'Closed Room',
+      leaderSessionId: 'leader-1',
+      status: 'closed' as const,
+      members: [{
+        memberId: 'member-closed',
+        kind: 'member' as const,
+        name: 'Closed member',
+        connection: { protocol: 'dsh.session/v1', sessionId: 'child-4' },
+        status: 'idle' as const,
+      }],
+    },
+  ],
+}
+
+describe('native Room member mentions', () => {
+  it('offers only active members in the current Session open Rooms and keeps duplicate names distinct', () => {
+    const candidates = roomMentionCandidates(mentionSnapshot, 'leader-1')
+
+    expect(candidates).toHaveLength(5)
+    expect(candidates.map(candidate => candidate.name)).toEqual([
+      'Alex · Release Room · member…1111',
+      'Alex · Release Room · member…2222',
+      'Mira',
+      'Alex · Design Room',
+      'Lin',
+    ])
+    expect(candidates.map(candidate => candidate.description)).toEqual([
+      'Release Room · idle · member…1111',
+      'Release Room · working · member…2222',
+      'Release Room · idle · member…3333',
+      'Design Room · interrupted · member…4444',
+      'Design Room · working · member…5555',
+    ])
+    expect(candidates.map(candidate => candidate.memberId)).toEqual([
+      'member-alex-111111',
+      'member-alex-222222',
+      'member-mira-333333',
+      'member-alex-444444',
+      'member-lin-555555',
+    ])
+    expect(new Set(candidates.map(candidate => `${candidate.roomId}/${candidate.memberId}`)).size).toBe(5)
+  })
+
+  it('uses the native source for leading-only search and identity-bound selection', async () => {
+    const loader = vi.fn(async () => mentionSnapshot)
+    const send = vi.fn(async () => undefined)
+    const source = createRoomMentionSource(loader, send)
+    const controller = new AbortController()
+    const session = { sessionId: 'leader-1' } as never
+
+    await expect(source.candidates(session, {
+      query: 'alex',
+      position: 'inline',
+      signal: controller.signal,
+    })).resolves.toEqual([])
+    const byRoom = await source.candidates(session, {
+      query: 'release',
+      position: 'leading',
+      signal: controller.signal,
+    })
+    const byId = await source.candidates(session, {
+      query: '222222',
+      position: 'leading',
+      signal: controller.signal,
+    })
+
+    expect(loader).toHaveBeenNthCalledWith(1, 'leader-1', controller.signal)
+    expect(byRoom).toHaveLength(3)
+    expect(byId).toHaveLength(1)
+    expect(byId[0]).toMatchObject({ memberId: 'member-alex-222222' })
+
+    const picked = source.onPick({
+      candidate: byId[0]!,
+      session,
+      position: 'leading',
+      via: 'menu',
+      span: { start: 7, end: 10, draftRev: 4 },
+    })
+    if (!picked || picked === 'handled' || !('claim' in picked)) throw new Error('Room member pick did not create a command claim')
+    expect(picked.claim.token).toBe('@Alex ')
+    await expect(picked.claim.submit('  Review the release  ', {} as never)).resolves.toEqual({
+      kind: 'success',
+      text: 'Sent to Alex.',
+    })
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      'leader-1',
+      'room-alpha/one',
+      'member-alex-222222',
+      'Review the release',
+    )
+    await expect(picked.claim.submit('   ', {} as never)).resolves.toEqual({
+      kind: 'error',
+      text: 'Write a message for Alex.',
+    })
+    expect(send).toHaveBeenCalledOnce()
+    send.mockRejectedValueOnce(new Error('Room is busy'))
+    await expect(picked.claim.submit('Try again', {} as never)).resolves.toEqual({
+      kind: 'error',
+      text: 'Room is busy',
+    })
+    expect(send).toHaveBeenCalledTimes(2)
+
+    expect(source.onPick({
+      candidate: { ...byId[0]! },
+      session,
+      position: 'leading',
+      via: 'menu',
+      span: { start: 7, end: 10, draftRev: 4 },
+    })).toBeUndefined()
+    expect(source.onPick({
+      candidate: byId[0]!,
+      session,
+      position: 'inline',
+      via: 'menu',
+      span: { start: 7, end: 10, draftRev: 4 },
+    })).toBeUndefined()
+
+  })
+})
+
 describe('native DSH Web entry', () => {
   it('depends only on additive slots and the native Session runtime', () => {
-    expect(inject).toEqual(['slots', 'sessions'])
+    expect(inject).toEqual(['slots', 'sessions', 'inputTriggers'])
+  })
+
+  it('registers one Room member source with the native @ input pipeline', () => {
+    const { context, registerSource } = clientHarness()
+
+    apply(context as never)
+
+    expect(registerSource).toHaveBeenCalledOnce()
+    expect(registerSource.mock.calls[0]?.[0]).toMatchObject({
+      trigger: '@',
+      name: ROOM_MENTION_SOURCE_NAME,
+      order: 20,
+    })
+  })
+
+  it('routes a picked member claim through the live Session /room command', async () => {
+    const command = vi.fn(async (_line: string) => ({ ok: true, value: { matched: true } }))
+    const { context, registerSource, sessions } = clientHarness()
+    sessions.binding.mockReturnValue({ session: { command } })
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => mentionSnapshot,
+    })))
+    apply(context as never)
+    const source = registerSource.mock.calls[0]?.[0] as ReturnType<typeof createRoomMentionSource>
+    const session = { sessionId: 'leader-1' } as never
+    const candidates = await source.candidates(session, {
+      query: '222222',
+      position: 'leading',
+      signal: new AbortController().signal,
+    })
+    const picked = source.onPick({
+      candidate: candidates[0]!,
+      session,
+      position: 'leading',
+      via: 'menu',
+      span: { start: 0, end: 7, draftRev: 1 },
+    })
+    if (!picked || picked === 'handled' || !('claim' in picked)) throw new Error('Room member pick did not create a command claim')
+
+    const message = "--Ship Bob's C:\\release\nnow"
+    await expect(picked.claim.submit(message, {} as never)).resolves.toEqual({
+      kind: 'success',
+      text: 'Sent to Alex.',
+    })
+    expect(sessions.binding).toHaveBeenCalledExactlyOnceWith('leader-1')
+    expect(command).toHaveBeenCalledExactlyOnceWith(
+      "/room send 'room-alpha/one' 'member-alex-222222' --message '--Ship Bob\\'s C:\\\\release\nnow'",
+    )
+    const commandLine = command.mock.calls[0]![0]
+    expect(parseRoomCommand(commandLine.slice('/room'.length))).toEqual({
+      action: 'send',
+      roomId: 'room-alpha/one',
+      memberId: 'member-alex-222222',
+      message,
+    })
   })
 
   it('registers only additive header and footer entries without replacing a native surface', () => {
@@ -129,13 +417,25 @@ describe('native DSH Web entry', () => {
         name: 'conversation.session.header.actions',
         id: ROOM_HEADER_ENTRY_ID,
         order: 20,
+        children: {
+          [ROOM_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+        },
       },
       {
         name: 'sidebar.footer.action',
         id: ROOM_FOOTER_ENTRY_ID,
         order: 20,
+        children: {
+          [ROOM_FOOTER_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+        },
       },
     ])
+    const childSlotNames = entries.flatMap(entry => Object.keys(entry.registration.children ?? {}))
+    expect(childSlotNames).toEqual([
+      ROOM_INVITE_PROVIDER_SLOT,
+      ROOM_FOOTER_INVITE_PROVIDER_SLOT,
+    ])
+    expect(new Set(childSlotNames).size).toBe(childSlotNames.length)
     expect(entries.map(entry => entry.registration.name)).not.toContain('root')
     expect(entries.map(entry => entry.registration.name)).not.toContain('sidebar')
     expect(entries.map(entry => entry.registration.name)).not.toContain('conversation')
@@ -245,7 +545,7 @@ describe('native DSH Web entry', () => {
     runInNewContext(source, { window })
 
     expect(id).toBe('dsh-agent-team-room')
-    expect(client).toMatchObject({ inject: ['slots', 'sessions'], apply: expect.any(Function) })
+    expect(client).toMatchObject({ inject: ['slots', 'sessions', 'inputTriggers'], apply: expect.any(Function) })
     expect(source).toContain('.Modal')
     expect(source).not.toMatch(/ROOM_DASHBOARD|ROOM_TEMPLATE_OPTIONS|room-template|One-Person Company/u)
   })
