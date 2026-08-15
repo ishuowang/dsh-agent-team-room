@@ -9,6 +9,7 @@ Room is coordination plumbing—not a team template, role library, task board, o
 [简体中文](README.zh.md) · [Install](#install) · [Native UI](#native-dsh-ui) · [Commands](#room-command) · [Provider SPI](#member-provider-spi) · [AI-agent support](#ai-agent-support--permission-required) · [Security](SECURITY.md)
 
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-0.1.0--rc.6-6C5CE7?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/ishuowang/dsh-agent-team-room/)
 [![Release](https://img.shields.io/github/v/release/ishuowang/dsh-agent-team-room?display_name=tag&sort=semver&style=flat-square&color=00B894)](https://github.com/ishuowang/dsh-agent-team-room/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/ishuowang/dsh-agent-team-room/ci.yml?branch=main&style=flat-square)](https://github.com/ishuowang/dsh-agent-team-room/actions)
 [![License](https://img.shields.io/github/license/ishuowang/dsh-agent-team-room?style=flat-square&color=0984E3)](LICENSE)
@@ -76,6 +77,12 @@ dsh web
 ```
 
 The bundle installs the Room Host service, model-facing tools, `/room` command, native Web extension, and read-only snapshot transport into the same profile.
+
+### Discovery
+
+This repository uses the GitHub `dsh-plugin` topic and npm `keywords` for search and catalog discovery. Its `package.json` declares both `dsh.bundle` (the installable profile patch) and `dsh.client` (the native Web extension). Agent Team Room is listed in the community-maintained [Awesome DSH Plugin](https://awesome-dsh-plugin.com/p/ishuowang/dsh-agent-team-room/) directory and is automatically included in the downstream [DSH market](https://github.com/dsh-market/dsh-market) catalog.
+
+The package is not published to npm yet. The versioned GitHub install command above remains valid: `dsh plugin` reads the complete bundle and client manifest directly from the installed GitHub checkout.
 
 ### Upgrading from v0.3 or earlier
 

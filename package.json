@@ -35,6 +35,9 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "dsh": {
@@ -69,10 +72,15 @@
     "agent-room",
     "session-room",
     "rolehub",
-    "native-ui"
+    "native-ui",
+    "cordis"
   ],
   "license": "MIT",
   "author": "ishuowang <ishuowang@qq.com>",
+  "funding": "https://ifdian.net/a/burienchow",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
