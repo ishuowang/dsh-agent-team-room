@@ -1,8 +1,10 @@
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import { type CreateRoomFromTemplateInput, type RoomTemplate, type RoomTemplateCreationResult } from './templates.js';
 import { type AddAgentInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomSummary, type RoomTask, type WaitResult } from './types.js';
 export * from './types.js';
+export * from './templates.js';
 export { RoomStorage, defaultStorageFile } from './storage.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -41,7 +43,22 @@ export default class RoomRuntime extends Service {
     createRoom(parent: Agent, input: {
         name: string;
         objective: string;
+        template?: {
+            id: string;
+            name: string;
+            version: number;
+        };
     }): Promise<Room>;
+    /** Return detached built-in templates for host commands, tools, and other adapters. */
+    listRoomTemplates(): RoomTemplate[];
+    /** Resolve one detached built-in template by its stable id. */
+    getRoomTemplate(templateId: string): RoomTemplate;
+    /**
+     * Expand one template into an ordinary durable room and independent child Sessions.
+     * Capacity is checked before the first write. If a later spawn fails, the traceable
+     * partial room is closed instead of pretending that already-created Sessions rolled back.
+     */
+    createRoomFromTemplate(parent: Agent, input: CreateRoomFromTemplateInput, signal: AbortSignal): Promise<RoomTemplateCreationResult>;
     listRooms(parent: Agent, includeClosed?: boolean): RoomSummary[];
     /** Dashboard-only inventory. It contains no storage path or hidden Agent transcript. */
     listAllRooms(includeClosed?: boolean): RoomSummary[];

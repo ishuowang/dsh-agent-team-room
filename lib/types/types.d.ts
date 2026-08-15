@@ -39,6 +39,12 @@ export interface RoomEvent {
     taskId?: string;
     message: string;
 }
+/** Optional provenance for a room expanded from a built-in scenario template. */
+export interface RoomTemplateRef {
+    id: string;
+    name: string;
+    version: number;
+}
 export interface Room {
     schemaVersion: typeof ROOM_SCHEMA_VERSION;
     id: string;
@@ -51,6 +57,7 @@ export interface Room {
     updatedAt: string;
     closedAt?: string;
     summary?: string;
+    template?: RoomTemplateRef;
     members: RoomMember[];
     tasks: RoomTask[];
     events: RoomEvent[];
@@ -64,6 +71,7 @@ export interface RoomSummary {
     memberCount: number;
     activeMemberCount: number;
     openTaskCount: number;
+    template?: RoomTemplateRef;
     createdAt: string;
     updatedAt: string;
 }

@@ -1,5 +1,6 @@
 # Agent Team Room is split into a durable host service, model-facing tools,
-# and an optional Web dashboard. The dashboard stays pending in non-Web profiles.
+# a Host slash command, and an optional Web dashboard. Web-only rows stay pending
+# when their injected services are not part of the active profile.
 - insert:
     - id: agent-team-room
       name: 'dsh-agent-team-room'
@@ -8,6 +9,9 @@
 
     - id: agent-team-room-tools
       name: 'dsh-agent-team-room/tools'
+
+    - id: agent-team-room-commands
+      name: 'dsh-agent-team-room/commands'
 
     - id: agent-team-room-dashboard
       name: 'dsh-agent-team-room/dashboard'

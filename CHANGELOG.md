@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-08-15
+
+- Add seven built-in Room scenarios: OPC, deep research, software delivery, incident response, customer support, content campaign, and plan-execute-review.
+- Add `room_template_list`, `room_create_from_template`, and the host `/room-template` command.
+- Decorate the bare command with DSH Web's native `popupSelect`, including a multi-Agent cost confirmation.
+- Persist optional template provenance without changing the Room storage schema version.
+- Rework the bilingual README around scenario concepts and accurately label the native entry and standalone board.
+
 ## 0.2.0 - 2026-08-14
 
 - Add a native, additive `Rooms` entry to the DSH Web sidebar footer.
