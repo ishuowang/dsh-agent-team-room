@@ -9,6 +9,24 @@ export const ROLEHUB_ROLE_API_VERSION = 'rolehub.dev/v1alpha1' as const
 
 export type RoomStatus = 'open' | 'closed'
 export type RoomMemberStatus = 'leader' | 'working' | 'idle' | 'interrupted' | 'error' | 'removed'
+export type RoomDeliveryMode = 'direct' | 'broadcast'
+export type RoomDeliveryStatus = 'accepted' | 'failed'
+
+/**
+ * Durable delivery metadata. Opaque provider delivery ids are intentionally
+ * not persisted: only the built-in DSH adapter may retain its exact Session
+ * MessageId for safe read-model correlation.
+ */
+export type RoomDeliveryReceipt =
+  | {
+      memberId: string
+      status: 'accepted'
+      sessionMessageId?: string
+    }
+  | {
+      memberId: string
+      status: 'failed'
+    }
 
 export type RoomEventType =
   | 'room.created'
@@ -68,7 +86,24 @@ export interface RoomEvent {
   at: string
   actorMemberId?: string
   targetMemberId?: string
+  /** Correlation only. Message contents remain in the destination transport. */
+  relay?: {
+    id: string
+    mode: RoomDeliveryMode
+    deliveries: RoomDeliveryReceipt[]
+  }
   message: string
+}
+
+/** Durable source attribution written into a DSH member Session for one Room relay. */
+export interface RoomRelayMessageSource {
+  kind: 'agent-team-room'
+  form: 'relay'
+  senderSessionId: string
+  roomId: string
+  memberId: string
+  relayId: string
+  mode: RoomDeliveryMode
 }
 
 export interface Room {
@@ -133,11 +168,9 @@ export interface RoomMemberAttachment {
   rollback?: () => Promise<void>
 }
 
-export interface BroadcastDelivery {
-  memberId: string
-  deliveryId?: string
-  error?: string
-}
+export type BroadcastDelivery =
+  | { memberId: string; deliveryId: string; error?: never }
+  | { memberId: string; error: string; deliveryId?: never }
 
 export function roomSummary(room: Room): RoomSummary {
   return {
