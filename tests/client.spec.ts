@@ -28,6 +28,9 @@ vi.mock('react', () => ({
   useMemo<T>(factory: () => T): T {
     return factory()
   },
+  useRef<T>(initial: T): { current: T } {
+    return { current: initial }
+  },
   useState<T>(initial: T): [T, () => void] {
     return [initial, () => undefined]
   },
@@ -54,6 +57,8 @@ import {
   ROOM_INVITE_PROVIDER_SLOT,
   ROOM_MENTION_SOURCE_NAME,
   ROOM_NATIVE_API_PREFIX,
+  ROOM_VIEW_ENTRY_ID,
+  ROOM_VIEW_INVITE_PROVIDER_SLOT,
   apply,
   createRoomMentionSource,
   inject,
@@ -68,6 +73,7 @@ interface RegisteredEntry {
     name: string
     id: string
     order: number
+    label?: string
     children?: Record<string, { kind: string; scope: string }>
   }
   component: (props: Record<string, unknown>) => FakeElement
@@ -94,16 +100,16 @@ function clientHarness() {
   return { context, entries, register, injectSlot, registerSource, sessions }
 }
 
-function renderLauncher(entry: RegisteredEntry, location: 'header' | 'footer'): FakeElement {
+function renderLauncher(entry: RegisteredEntry, location: 'header' | 'footer' | 'view'): FakeElement {
   const state = { current: 'leader-1', subagentsByParent: {} }
-  const ownerProps = location === 'header'
+  const ownerProps = location === 'footer'
     ? {
-        sessionId: 'leader-1',
+        wide: true,
         useSessions: (selector: (value: typeof state) => unknown) => selector(state),
         renderSlot: () => null,
       }
     : {
-        wide: true,
+        sessionId: 'leader-1',
         useSessions: (selector: (value: typeof state) => unknown) => selector(state),
         renderSlot: () => null,
       }
@@ -402,17 +408,27 @@ describe('native DSH Web entry', () => {
     })
   })
 
-  it('registers only additive header and footer entries without replacing a native surface', () => {
+  it('registers an additive native Room view plus launchers without replacing a root surface', () => {
     const { context, entries, injectSlot, register } = clientHarness()
 
     apply(context as never)
 
     expect(injectSlot.mock.calls.map(call => call[0])).toEqual([
+      'conversation.view',
       'conversation.session.header.actions',
       'sidebar.footer.action',
     ])
-    expect(register).toHaveBeenCalledTimes(2)
+    expect(register).toHaveBeenCalledTimes(3)
     expect(entries.map(entry => entry.registration)).toEqual([
+      {
+        name: 'conversation.view',
+        id: ROOM_VIEW_ENTRY_ID,
+        order: 5,
+        label: 'Room',
+        children: {
+          [ROOM_VIEW_INVITE_PROVIDER_SLOT]: { kind: 'list', scope: 'session' },
+        },
+      },
       {
         name: 'conversation.session.header.actions',
         id: ROOM_HEADER_ENTRY_ID,
@@ -432,6 +448,7 @@ describe('native DSH Web entry', () => {
     ])
     const childSlotNames = entries.flatMap(entry => Object.keys(entry.registration.children ?? {}))
     expect(childSlotNames).toEqual([
+      ROOM_VIEW_INVITE_PROVIDER_SLOT,
       ROOM_INVITE_PROVIDER_SLOT,
       ROOM_FOOTER_INVITE_PROVIDER_SLOT,
     ])
@@ -439,7 +456,31 @@ describe('native DSH Web entry', () => {
     expect(entries.map(entry => entry.registration.name)).not.toContain('root')
     expect(entries.map(entry => entry.registration.name)).not.toContain('sidebar')
     expect(entries.map(entry => entry.registration.name)).not.toContain('conversation')
+    expect(entries.map(entry => entry.registration.name)).not.toContain('conversation.session')
+    expect(entries.map(entry => entry.registration.name)).not.toContain('conversation.session.header')
     expect(entries.map(entry => entry.registration.name)).not.toContain('details')
+  })
+
+  it('renders a complete Room workspace directly inside the native conversation view', () => {
+    const { context, entries } = clientHarness()
+    apply(context as never)
+
+    const view = entries.find(entry => entry.registration.id === ROOM_VIEW_ENTRY_ID)
+    if (!view) throw new Error('Room conversation view was not registered')
+    const rendered = renderLauncher(view, 'view')
+
+    expect(rendered.type).toBe('section')
+    expect(rendered.props).toMatchObject({
+      'data-room-conversation-view': true,
+      'aria-label': 'Room conversation',
+    })
+    expect(findElement(rendered, 'Modal')).toBeUndefined()
+    expect(findElement(rendered, 'RiskConfirmation')?.props).toMatchObject({
+      open: false,
+      acknowledged: false,
+    })
+    expect(JSON.stringify(rendered)).toContain('data-room-workspace')
+    expect(JSON.stringify(rendered)).toContain('One Room, many independent Sessions')
   })
 
   it('renders Room management in a native Modal from either additive entry', () => {
@@ -477,13 +518,16 @@ describe('native DSH Web entry', () => {
 
     expect(ROOM_NATIVE_API_PREFIX).toBe('/agent-team-room/api/session/')
     expect(roomSnapshotUrl('leader/one')).toBe('/agent-team-room/api/session/leader%2Fone')
+    expect(roomSnapshotUrl('leader/one', 'room/one')).toBe(
+      '/agent-team-room/api/session/leader%2Fone?roomId=room%2Fone',
+    )
     await expect(loadRoomSnapshot('leader/one')).resolves.toEqual({ rooms: [] })
     expect(fetch).toHaveBeenCalledExactlyOnceWith(
       '/agent-team-room/api/session/leader%2Fone',
       {
         method: 'GET',
         credentials: 'same-origin',
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', 'x-agent-team-room-client': '1' },
       },
     )
   })

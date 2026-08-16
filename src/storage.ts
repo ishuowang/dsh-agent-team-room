@@ -38,6 +38,14 @@ function optionalString(value: unknown, field: string): string | undefined {
   return string(value, field)
 }
 
+function boundedOptionalString(value: unknown, field: string, maximum: number): string | undefined {
+  const result = optionalString(value, field)
+  if (result !== undefined && result.length > maximum) {
+    throw new Error(`agent-team-room: ${field} exceeds ${maximum} characters`)
+  }
+  return result
+}
+
 function assertMember(value: unknown, roomIndex: number, memberIndex: number): asserts value is RoomMember {
   const member = record(value, `stored room ${roomIndex} member ${memberIndex}`)
   string(member['memberId'], `stored room ${roomIndex} member ${memberIndex} memberId`)
@@ -71,6 +79,70 @@ function assertMember(value: unknown, roomIndex: number, memberIndex: number): a
   }
 }
 
+function assertEvent(value: unknown, roomIndex: number, eventIndex: number): asserts value is RoomEvent {
+  const event = record(value, `stored room ${roomIndex} event ${eventIndex}`)
+  string(event['id'], `stored room ${roomIndex} event ${eventIndex} id`)
+  if (![
+    'room.created',
+    'room.closed',
+    'member.joined',
+    'member.left',
+    'member.started',
+    'member.settled',
+    'message.direct',
+    'message.broadcast',
+    'system.recovered',
+    'system.migrated',
+  ].includes(String(event['type']))) {
+    throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} has an unsupported type`)
+  }
+  string(event['at'], `stored room ${roomIndex} event ${eventIndex} at`)
+  string(event['message'], `stored room ${roomIndex} event ${eventIndex} message`)
+  optionalString(event['actorMemberId'], `stored room ${roomIndex} event ${eventIndex} actorMemberId`)
+  optionalString(event['targetMemberId'], `stored room ${roomIndex} event ${eventIndex} targetMemberId`)
+  if (event['relay'] === undefined) return
+  if (event['type'] !== 'message.direct' && event['type'] !== 'message.broadcast') {
+    throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} has relay metadata on a non-message event`)
+  }
+  const relay = record(event['relay'], `stored room ${roomIndex} event ${eventIndex} relay`)
+  string(relay['id'], `stored room ${roomIndex} event ${eventIndex} relay id`)
+  if (relay['mode'] !== 'direct' && relay['mode'] !== 'broadcast') {
+    throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} relay has an unsupported mode`)
+  }
+  if ((event['type'] === 'message.direct') !== (relay['mode'] === 'direct')) {
+    throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} relay mode does not match its event type`)
+  }
+  if (!Array.isArray(relay['deliveries']) || relay['deliveries'].length === 0) {
+    throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} relay has no deliveries`)
+  }
+  if (relay['mode'] === 'direct' && relay['deliveries'].length !== 1) {
+    throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} direct relay has multiple deliveries`)
+  }
+  const memberIds = new Set<string>()
+  relay['deliveries'].forEach((candidate, deliveryIndex) => {
+    const delivery = record(candidate, `stored room ${roomIndex} event ${eventIndex} relay delivery ${deliveryIndex}`)
+    const memberId = string(delivery['memberId'], `stored room ${roomIndex} event ${eventIndex} relay delivery ${deliveryIndex} memberId`)
+    if (memberIds.has(memberId)) {
+      throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} relay repeats member ${memberId}`)
+    }
+    memberIds.add(memberId)
+    if (delivery['status'] !== 'accepted' && delivery['status'] !== 'failed') {
+      throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} relay delivery ${deliveryIndex} has an unsupported status`)
+    }
+    if ('deliveryId' in delivery) {
+      throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} relay delivery ${deliveryIndex} contains a provider deliveryId`)
+    }
+    const sessionMessageId = boundedOptionalString(
+      delivery['sessionMessageId'],
+      `stored room ${roomIndex} event ${eventIndex} relay delivery ${deliveryIndex} sessionMessageId`,
+      240,
+    )
+    if (delivery['status'] === 'failed' && sessionMessageId !== undefined) {
+      throw new Error(`agent-team-room: stored room ${roomIndex} event ${eventIndex} failed relay delivery ${deliveryIndex} contains a Session MessageId`)
+    }
+  })
+}
+
 function assertRoom(value: unknown, index: number): asserts value is Room {
   const room = record(value, `stored room ${index}`)
   if (room['schemaVersion'] !== ROOM_SCHEMA_VERSION) {
@@ -86,9 +158,36 @@ function assertRoom(value: unknown, index: number): asserts value is Room {
     throw new Error(`agent-team-room: stored room ${index} is missing collections`)
   }
   room['members'].forEach((member, memberIndex) => assertMember(member, index, memberIndex))
+  room['events'].forEach((event, eventIndex) => assertEvent(event, index, eventIndex))
   if (!room['members'].some(member => record(member, 'stored member')['kind'] === 'leader')) {
     throw new Error(`agent-team-room: stored room ${index} has no leader`)
   }
+  const membersById = new Map(room['members'].map((candidate) => {
+    const member = record(candidate, `stored room ${index} member`)
+    return [String(member['memberId']), member]
+  }))
+  room['events'].forEach((candidate, eventIndex) => {
+    const event = record(candidate, `stored room ${index} event ${eventIndex}`)
+    if (event['relay'] === undefined) return
+    const relay = record(event['relay'], `stored room ${index} event ${eventIndex} relay`)
+    for (const [deliveryIndex, candidateDelivery] of (relay['deliveries'] as unknown[]).entries()) {
+      const delivery = record(candidateDelivery, `stored room ${index} event ${eventIndex} relay delivery ${deliveryIndex}`)
+      const member = membersById.get(String(delivery['memberId']))
+      if (!member) {
+        throw new Error(`agent-team-room: stored room ${index} event ${eventIndex} references an unknown member`)
+      }
+      if (delivery['status'] !== 'accepted') continue
+      const connection = record(member['connection'], `stored room ${index} member connection`)
+      const builtInSession = connection['providerId'] === DSH_SESSION_MEMBER_PROVIDER
+        && connection['protocol'] === DSH_SESSION_MEMBER_PROTOCOL
+      if (builtInSession && delivery['sessionMessageId'] === undefined) {
+        throw new Error(`agent-team-room: stored room ${index} event ${eventIndex} accepted DSH delivery has no Session MessageId`)
+      }
+      if (!builtInSession && delivery['sessionMessageId'] !== undefined) {
+        throw new Error(`agent-team-room: stored room ${index} event ${eventIndex} exposes a Session MessageId for an external provider`)
+      }
+    }
+  })
 }
 
 function legacyEventType(value: unknown): RoomEventType {
@@ -254,6 +353,7 @@ export class RoomStorage {
       schemaVersion: ROOM_SCHEMA_VERSION,
       rooms: structuredClone([...rooms]),
     }
+    document.rooms.forEach(assertRoom)
     await writeFile(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
     await rename(temporary, this.file)
     this.migrated = false

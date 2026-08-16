@@ -2,9 +2,9 @@
 
 # Agent Team Room
 
-**A native DeepSeek Harness Room for connecting independent Sessions and provider-backed AI members.**
+**A native DeepSeek Harness conversation workspace for independent Sessions and provider-backed AI members.**
 
-Room is coordination plumbing—not a team template, role library, task board, or second chat app.
+Room is coordination plumbing with a native cross-Session timeline—not a team template, role library, task board, or standalone replacement chat app.
 
 [简体中文](README.zh.md) · [Install](#install) · [Native UI](#native-dsh-ui) · [@ mentions](#mention-a-room-member) · [Commands](#room-command) · [Provider SPI](#member-provider-spi) · [AI support](#ai-support) · [Security](SECURITY.md)
 
@@ -16,7 +16,7 @@ Room is coordination plumbing—not a team template, role library, task board, o
 
 </div>
 
-A Room is a durable, leader-owned membership boundary. It connects members that keep their own context and lifecycle, routes direct messages or broadcasts through the member's provider, and records bounded coordination metadata without copying Session transcripts.
+A Room is a durable, leader-owned membership boundary. It connects members that keep their own context and lifecycle, routes direct messages or broadcasts through the member's provider, and records bounded coordination metadata without copying Session transcripts. The native Room view reconstructs Room-addressed text and member replies from the backing DSH Session logs when they are available.
 
 > **The v0.4 reset:** built-in scenarios, embedded roles, tracked tasks, and the standalone dashboard are gone. To add a role, use an independent [RoleHub](https://github.com/ishuowang/agent-role-hub) bridge. To manage a Room, stay inside DSH's native UI.
 
@@ -27,13 +27,19 @@ flowchart LR
   L[Leader Session] --> R[Room core]
   R -->|built in| D[DSH Session provider]
   D --> C[Continuable direct-child Sessions]
+  C --> S[Member Session logs]
 
   H[Trusted Host integration] -->|register provider| R
   RH[Optional RoleHub bridge] -->|verified role Session + provenance| H
   H --> X[Other member transports]
 
-  UI[Native DSH header / footer] --> M[Native Room modal]
+  UI[Native DSH Chat / Room tabs] --> V[Native Room workspace]
+  E[Header / footer launchers] --> M[Native Room modal]
+  R -->|membership + relay correlation| P[Conversation projection]
+  S -->|Room-tagged turns + replies| P
+  V -->|read-only text timeline| P
   M -->|read-only snapshot| R
+  V -->|/room commands for writes| L
   M -->|/room commands for writes| L
 ```
 
@@ -42,16 +48,32 @@ flowchart LR
 | Persistent Room identity and membership | Role catalogs, prompts, skills, or tool policy |
 | Provider addresses and member lifecycle hints | Built-in company/research/software team scenarios |
 | Direct delivery, broadcast, removal, and close | Task planning, assignment, completion, or kanban state |
-| Bounded metadata events | Session transcripts or hidden shared context |
+| Bounded metadata events and relay correlation | Duplicated Session transcripts or hidden shared context |
 | Leader-scoped authorization for mutations | Arbitrary peer attachment or capability grants |
 
 This separation keeps Room useful for ordinary Sessions, RoleHub roles, and future transports without making any one role system mandatory.
 
 ## Native DSH UI
 
-Room extends DSH Web through the official typed `conversation.session.header.actions` and `sidebar.footer.action` slots. Both entries open the same native `Modal`; the conversation, composer, sidebar, and details surfaces remain mounted and usable.
+Room extends DSH Web through three official typed slots. `conversation.view` adds a full `Room` tab beside the native `Chat` tab, while `conversation.session.header.actions` and `sidebar.footer.action` keep compact launchers that open the same native `Modal`. The original conversation, composer, sidebar, and details surfaces remain mounted and usable.
 
-Inside the member attach panel, Room declares optional typed provider seats for both native launchers: the backward-compatible header key `agent-team-room.invite.provider` and the footer key `agent-team-room.invite.provider.footer`. A bridge such as [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) can contribute the same verified member picker to both. Each child-slot key is declared exactly once, as required by DSH SlotCore. With no provider installed the seats render nothing, so Room's standalone behavior is unchanged.
+The `Room` tab is a complete native conversation workspace, not a standalone dashboard. It combines Room selection, a chronological conversation and activity timeline, a recipient-aware composer, member status and navigation, Session/provider attachment, removal, and close controls. Choose **Everyone** to broadcast or one member for a direct relay; accepted broadcasts share one relay identity and appear once, while each member's visible-text reply appears under that Room timeline.
+
+### How the conversation timeline works
+
+Room does not create a second transcript database. Each successful built-in DSH delivery writes a durable `agent-team-room` source into the destination member Session with the Room id, stable member id, relay id, and direct/broadcast mode. Room stores the matching non-secret DSH Session MessageId as an accepted receipt; the read-only Host projection requires an exact receipt, source, member, sender, mode, and MessageId match before rendering anything. It then keeps only visible-text assistant messages from those turns, deduplicates a broadcast across recipients, and merges the result with metadata-only activity rows. `rooms.json` never receives the prompt, reply body, or an external provider's opaque delivery id. Each selected-Room snapshot is bounded to the newest 200 conversation messages, 200 activity rows, 20,000 characters per message, and 200,000 message characters total.
+
+The projection is deliberately fail-closed. If one child turn consumes a correlated Room relay plus any other appended Session input—another Room, a human prompt, a notice, a goal/skill invocation, a reference, or another plugin source—its assistant reply remains only in the backing Session instead of being exposed in the Room timeline. The UI reports the hidden mixed-input reply and lets the user open that Session. Replacement surface copies, reasoning blocks, tool calls, raw event payloads, provider addresses, profile digests, and unrelated Session turns are not projected.
+
+Conversation history is currently available only when both the provider (`dsh-session`) and protocol (`dsh.session/v1`) identify the built-in transport. An external provider can still attach, receive direct messages and broadcasts, and participate in lifecycle controls, but its transcript is reported as unavailable because Room has no trusted history contract for that transport. Delivery controls continue to work. When the optional DSH session-query service is present, persisted histories survive a Host restart; otherwise the projection can read only member Sessions that are currently live.
+
+Inside each member attach panel, Room declares an optional typed provider seat: the backward-compatible header key `agent-team-room.invite.provider`, the footer key `agent-team-room.invite.provider.footer`, and the view key `agent-team-room.invite.provider.view`. A bridge such as [`dsh-rolehub-bridge`](https://github.com/ishuowang/dsh-rolehub-bridge) can contribute the same verified member picker to all three. Each child-slot key is declared exactly once, as required by DSH SlotCore. With no provider installed the seats render nothing, so Room's standalone behavior is unchanged.
+
+<p align="center">
+  <img src="assets/native-room-view.png" width="960" alt="Native DSH Chat and Room tabs with the Agent Team Room workspace">
+  <br>
+  <sub>The bundled Room view with synthetic data: native tabs, Room rail, conversation timeline, recipient-aware Room composer, member controls, and RoleHub provider seat.</sub>
+</p>
 
 <p align="center">
   <img src="assets/native-room.png" width="768" alt="Agent Team Room overview inside a native DSH Web modal">
@@ -59,7 +81,7 @@ Inside the member attach panel, Room declares optional typed provider seats for 
   <sub>Room overview in the native DSH Web surface. No standalone dashboard or replacement application.</sub>
 </p>
 
-The modal can create a Room, select one led by or containing the current Session, and perform leader-authorized writes through the Host-native `/room` command. Removing a member or closing a Room opens a native acknowledgement step before the interrupting action runs.
+The Room workspace and modal can create a Room, select one led by or containing the current Session, and perform leader-authorized writes through the Host-native `/room` command. The embedded Room composer uses that same command path for direct and broadcast delivery. Removing a member or closing a Room opens a native acknowledgement step before the interrupting action runs.
 
 <p align="center">
   <img src="assets/native-members.png" width="768" alt="Native Agent Team Room member management panel in DSH Web">
@@ -81,7 +103,9 @@ The picker lists only non-removed members from open Rooms led by the current Ses
 
 Room mentions are deliberately leading-only in v0.6. Inline `@` remains available to other DSH reference sources instead of silently changing an ordinary model prompt into a Room mutation.
 
-The UI reads a field-whitelisted membership snapshot from a small same-origin `GET` endpoint. That endpoint accepts no mutations and omits provider addresses, profile digests, event history, message bodies, and Session transcripts. Every write goes back through `/room`, where the Host repeats leader ownership checks.
+The UI reads a field-whitelisted snapshot from a small same-origin `GET` endpoint. The initial response contains bounded Room metadata only; after selection, the endpoint derives the conversation for that one visible Room, plus sanitized activity labels. It never returns provider addresses, profile digests, raw Room events, complete Session transcripts, reasoning, or tool calls. The endpoint accepts no mutations. Every write goes back through `/room`, where the Host repeats leader ownership checks.
+
+Because this read endpoint now returns Room-addressed text, its strict `Sec-Fetch-Site: same-origin` check and native-client request marker must not be treated as authentication. They are browser request hardening, not an identity or tenant boundary. Keep the DSH origin on loopback or a private network, or place it behind an authenticated TLS reverse proxy that enforces user access. Do not expose the raw Host or an unauthenticated tunnel directly to the Internet.
 
 ## Install
 
@@ -104,6 +128,8 @@ The package is not published to npm yet. The versioned GitHub install command ab
 
 Back up the Room storage file before the first v0.4 start. The one-time schema v1 → v2 migration keeps Rooms and Session membership, converts stored delivery text to metadata-only events, and intentionally drops the old task-board records. It never deletes backing DSH Sessions.
 
+The conversation view only recognizes deliveries carrying the new durable Room relay source. Older deliveries remain as metadata activity and are not guessed back into the chat timeline.
+
 ## First Room
 
 Create a Room from the native modal, or use the command plane:
@@ -122,6 +148,8 @@ Room does not spawn a role or inject a prompt. Create a continuable child Sessio
 ```
 
 Or, from the Room leader's native DSH composer, type `@`, choose one member, write the message, and press Enter. The selected member receives a direct Room relay without involving the leader model.
+
+In the `Room` tab, select **Everyone** or one member in the embedded composer. Direct messages, broadcasts, metadata activity, and correlated member replies are merged into one ordered timeline. The view refreshes its read-only snapshot every three seconds while mounted; use **Refresh conversation** for an immediate pull. It does not open a streaming connection.
 
 Removing a member detaches it from the Room and, by default, asks its provider to interrupt active work. Closing a Room does the same for remaining members and retains bounded metadata history. Neither operation deletes a backing Session or transport.
 
@@ -169,6 +197,8 @@ ctx.rooms.registerMemberProvider({
 ```
 
 An integration prepares a member, then calls `ctx.rooms.attachMember(...)` with its provider id and opaque descriptor. Provider code runs inside the trusted DSH Host process: install and review it with the same care as any other privileged plugin. Room reserves capacity before provider preparation and can invoke provider-owned rollback if the membership commit fails.
+
+`deliver(context)` also receives `context.relay.id` and `context.relay.mode`, so a transport can retain stable direct/broadcast correlation without inspecting display text. Its returned `deliveryId` is opaque and returned to the caller, but Room does not persist or expose that value. Only the built-in `dsh-session` adapter records its non-secret DSH Session MessageId for exact transcript correlation. The current native conversation projection intentionally reads only members whose provider and protocol are both the built-in DSH transport. A different provider remains fully usable for delivery and lifecycle operations, but the Room view marks that member's transcript unavailable rather than guessing, scraping, or leaking transport-private history.
 
 For an already-created continuable direct-child DSH Session, the public convenience API also accepts optional provider-neutral provenance:
 
@@ -221,9 +251,11 @@ The default storage path is `$DSH_HOME/agent-team-room/rooms.json`, or `~/.dsh/a
 
 - Only the leader Session can mutate its Room. Native UI controls do not bypass Host checks.
 - The built-in provider accepts only continuable direct-child Sessions and uses DSH's normal follow-up and interruption paths.
-- Message bodies go to the destination transport and are not copied into Room persistence; events retain delivery metadata only.
+- Message bodies go to the destination Session and are not copied into `rooms.json`; Room events retain delivery status and relay correlation only. External provider delivery ids are not persisted.
+- The native read projection derives Room-addressed text from backing Session logs on demand. It excludes replacement surface copies, reasoning, tool calls, unrelated turns, and any reply from a turn that also consumed any other appended Session input.
+- External providers without the built-in DSH transcript protocol are shown as transcript unavailable; this never blocks delivery or fabricates a Room reply.
 - Member identity, including RoleHub provenance, is descriptive and never a permission grant.
-- The native snapshot endpoint's same-origin browser check is not a substitute for authentication. Protect the DSH origin with authenticated TLS before exposing it remotely.
+- The native snapshot endpoint returns derived Room message text. Its same-origin browser check is not authentication or tenant isolation: keep the Host private, or protect the entire DSH origin with authenticated TLS and per-user access before remote use. Never publish an unauthenticated tunnel directly.
 - A provider is trusted same-process code. Room cannot sandbox a malicious or misconfigured provider.
 - Do not put credentials or secrets in Room names, topics, summaries, member labels, or delivery content.
 
