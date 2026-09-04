@@ -17,6 +17,7 @@ import RoomRuntime, {
   DSH_SESSION_MEMBER_PROTOCOL,
   DSH_SESSION_MEMBER_PROVIDER,
   ROLEHUB_ROLE_API_VERSION,
+  ROOM_SCHEMA_VERSION,
   type Config,
   type RoomMemberProvider,
 } from '../src/index.js'
@@ -349,17 +350,34 @@ describe('RoomRuntime DSH Session membership and messaging', () => {
         childId: 'existing-child',
         content: [{ type: 'text', text: 'Review this change' }],
         options: expect.objectContaining({
-          source: { kind: 'coordinator', form: 'relay', senderSessionId: owner.id },
+          source: {
+            kind: 'agent-team-room',
+            form: 'relay',
+            senderSessionId: owner.id,
+            roomId: room.id,
+            memberId: member.memberId,
+            relayId: expect.any(String),
+            mode: 'direct',
+          },
         }),
       }),
     ])
+    const relayId = (subagents.followups[0]!.options.source as unknown as { relayId: string }).relayId
+    expect(runtime.getRoom(owner, room.id).events.at(-1)).toMatchObject({
+      type: 'message.direct',
+      relay: {
+        id: relayId,
+        mode: 'direct',
+        deliveries: [{ memberId: member.memberId, status: 'accepted', sessionMessageId: 'followup-1' }],
+      },
+    })
   })
 
   it('delivers direct and broadcast messages without retaining their contents in metadata or storage', async () => {
     const { runtime, storageFile } = await createHarness()
     const owner = leader()
     const room = await runtime.createRoom(owner, { name: 'Private relay' })
-    const delivered: Array<{ endpoint: string; message: string }> = []
+    const delivered: Array<{ endpoint: string; message: string; relayId: string; mode: string }> = []
     const provider: RoomMemberProvider = {
       id: 'private-relay',
       attach: async ({ descriptor }) => {
@@ -369,9 +387,9 @@ describe('RoomRuntime DSH Session membership and messaging', () => {
           connection: { protocol: 'private.relay/v1', address: { endpoint } },
         }
       },
-      deliver: async ({ member, message }) => {
+      deliver: async ({ member, message, relay }) => {
         const endpoint = (member.connection.address as { endpoint: string }).endpoint
-        delivered.push({ endpoint, message })
+        delivered.push({ endpoint, message, relayId: relay.id, mode: relay.mode })
         if (endpoint === 'broken') throw new Error('remote unavailable')
         return { deliveryId: `${endpoint}-${delivered.length}` }
       },
@@ -395,23 +413,72 @@ describe('RoomRuntime DSH Session membership and messaging', () => {
       expect.objectContaining({ memberId: broken.memberId, error: 'remote unavailable' }),
     ])
 
-    expect(delivered).toEqual([
-      { endpoint: 'ready', message: directSecret },
-      { endpoint: 'ready', message: broadcastSecret },
-      { endpoint: 'broken', message: broadcastSecret },
+    expect(delivered.map(({ endpoint, message, mode }) => ({ endpoint, message, mode }))).toEqual([
+      { endpoint: 'ready', message: directSecret, mode: 'direct' },
+      { endpoint: 'ready', message: broadcastSecret, mode: 'broadcast' },
+      { endpoint: 'broken', message: broadcastSecret, mode: 'broadcast' },
     ])
+    expect(delivered[1]!.relayId).toBe(delivered[2]!.relayId)
+    expect(delivered[0]!.relayId).not.toBe(delivered[1]!.relayId)
     const updated = runtime.getRoom(owner, room.id)
     expect(updated.members.find(candidate => candidate.memberId === ready.memberId)?.status).toBe('working')
     expect(updated.members.find(candidate => candidate.memberId === broken.memberId)?.status).toBe('error')
     expect(updated.events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'message.direct', message: 'Message delivered to ready' }),
-      expect.objectContaining({ type: 'message.broadcast', message: 'Broadcast delivered to 2 member(s)' }),
+      expect.objectContaining({
+        type: 'message.direct',
+        message: 'Message delivered to ready',
+        relay: {
+          id: delivered[0]!.relayId,
+          mode: 'direct',
+          deliveries: [{ memberId: ready.memberId, status: 'accepted' }],
+        },
+      }),
+      expect.objectContaining({
+        type: 'message.broadcast',
+        message: 'Broadcast attempted for 2 member(s)',
+        relay: {
+          id: delivered[1]!.relayId,
+          mode: 'broadcast',
+          deliveries: [
+            { memberId: ready.memberId, status: 'accepted' },
+            { memberId: broken.memberId, status: 'failed' },
+          ],
+        },
+      }),
     ]))
     expect(JSON.stringify(updated)).not.toContain(directSecret)
     expect(JSON.stringify(updated)).not.toContain(broadcastSecret)
     const persisted = await readFile(storageFile, 'utf8')
     expect(persisted).not.toContain(directSecret)
     expect(persisted).not.toContain(broadcastSecret)
+  })
+
+  it('records an empty provider failure as failed without corrupting persisted Room state', async () => {
+    const { runtime, storageFile } = await createHarness()
+    const owner = leader()
+    const room = await runtime.createRoom(owner, { name: 'Empty error relay' })
+    runtime.registerMemberProvider({
+      id: 'empty-error-provider',
+      attach: async () => ({
+        name: 'Empty error member',
+        connection: { protocol: 'empty.error/v1', address: { endpoint: 'empty' } },
+      }),
+      deliver: async () => { throw new Error('') },
+    })
+    const member = await runtime.attachMember(owner, room.id, {
+      providerId: 'empty-error-provider',
+      descriptor: { endpoint: 'empty' },
+    }, signal())
+
+    await expect(runtime.broadcast(owner, room.id, 'Test empty error', signal())).resolves.toEqual([
+      { memberId: member.memberId, error: '' },
+    ])
+    const updated = runtime.getRoom(owner, room.id)
+    expect(updated.members.find(candidate => candidate.memberId === member.memberId)?.status).toBe('error')
+    expect(updated.events.at(-1)?.relay?.deliveries).toEqual([
+      { memberId: member.memberId, status: 'failed' },
+    ])
+    expect(JSON.parse(await readFile(storageFile, 'utf8'))).toMatchObject({ schemaVersion: ROOM_SCHEMA_VERSION })
   })
 })
 

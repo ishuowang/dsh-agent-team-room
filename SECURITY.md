@@ -22,13 +22,13 @@ RoleHub `AgentRole` identity is non-authorizing provenance. Room validates the r
 
 ## Native Web snapshot transport
 
-The native DSH modal reads a minimal Room projection through `GET /agent-team-room/api/session/:sessionId`. The endpoint rejects browser requests marked cross-site, accepts no writes, disables caching, and omits provider-owned address descriptors, profile digests, event history, summaries, delivery bodies, and Session transcripts.
+The native DSH Room view and modal read a field-whitelisted projection through `GET /agent-team-room/api/session/:sessionId`. The endpoint requires an explicit same-origin Fetch Metadata value plus a native-client marker, accepts no writes, and disables browser caching. Its initial response returns bounded Room metadata only; `?roomId=` may derive sanitized lifecycle labels and visible Room-correlated text for exactly one Room that is visible to the requested Session. It omits provider-owned address descriptors and delivery ids, profile digests, raw Room events, summaries, complete Session transcripts, reasoning blocks, tool calls, and unrelated turns.
 
-The same-origin check is a browser data-flow control, not user authentication. A client that can reach the DSH origin and knows or guesses Session ids may attempt direct requests. Keep DSH bound to a trusted interface, and put authenticated TLS in front of it before any remote exposure. Do not rely on `Sec-Fetch-Site` headers as the only boundary for untrusted networks.
+The same-origin check and custom request header are browser data-flow controls, not user authentication or tenant isolation. A client that can reach the DSH origin and knows or guesses Session ids may attempt direct requests. Keep DSH bound to loopback or a private trusted interface, and put authenticated TLS with per-user access control in front of the entire DSH origin before any remote exposure. Never expose the raw Host or an unauthenticated tunnel, and do not rely on request headers as the only boundary for untrusted networks.
 
 ## Persistence and data handling
 
-Room state defaults to `$DSH_HOME/agent-team-room/rooms.json`, written through atomic replacement with mode `0600`. The store contains Room names, topics, summaries, member labels, provider/protocol/address metadata, optional identity provenance, lifecycle hints, and bounded delivery metadata. Message bodies and Session transcripts are not persisted by Room v0.4.
+Room state defaults to `$DSH_HOME/agent-team-room/rooms.json`, written through atomic replacement with mode `0600`. The store contains Room names, topics, summaries, member labels, provider/protocol/address metadata, optional identity provenance, lifecycle hints, delivery status, relay ids, and—for the built-in adapter only—non-secret DSH Session MessageIds used for exact correlation. External provider delivery ids, message bodies, and Session transcripts are not persisted in that Room store. Message bodies and replies remain in the destination DSH Session or provider transport and may be returned as the bounded, derived text-only view described above.
 
 Room persistence is single-writer. Do not run multiple DSH processes against one storage file; use separate `storageFile` values. Restrict filesystem and backup access because provider addresses and identity metadata can still be sensitive.
 

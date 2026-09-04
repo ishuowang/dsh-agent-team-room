@@ -25,12 +25,43 @@ interface RoomView {
     leaderSessionId: string;
     status: 'open' | 'closed';
     members: RoomMemberView[];
+    activity?: Array<{
+        id: string;
+        type: string;
+        at: string;
+        actorMemberId?: string;
+        targetMemberId?: string;
+        relayId?: string;
+        acceptedCount?: number;
+        failedCount?: number;
+        label: string;
+    }>;
+    conversation?: {
+        messages: Array<{
+            id: string;
+            at: number;
+            role: 'leader' | 'member';
+            authorMemberId: string;
+            authorName: string;
+            recipientMemberIds: string[];
+            text: string;
+            status: 'accepted' | 'completed';
+            sessionId?: string;
+            relayId?: string;
+            mode?: 'direct' | 'broadcast';
+            replyTo?: string[];
+        }>;
+        unavailableMemberIds: string[];
+        hiddenMixedReplyCount: number;
+    };
 }
 export declare const ROOM_HEADER_ENTRY_ID = "dsh-agent-team-room-header";
 export declare const ROOM_FOOTER_ENTRY_ID = "dsh-agent-team-room-footer";
+export declare const ROOM_VIEW_ENTRY_ID = "agent-team-room";
 export declare const ROOM_NATIVE_API_PREFIX = "/agent-team-room/api/session/";
 export declare const ROOM_INVITE_PROVIDER_SLOT = "agent-team-room.invite.provider";
 export declare const ROOM_FOOTER_INVITE_PROVIDER_SLOT = "agent-team-room.invite.provider.footer";
+export declare const ROOM_VIEW_INVITE_PROVIDER_SLOT = "agent-team-room.invite.provider.view";
 export declare const ROOM_MENTION_SOURCE_NAME = "Room members";
 /** Owner props exposed to optional member-source plugins inside the Room invite panel. */
 export interface RoomInviteProviderOwnerProps {
@@ -54,10 +85,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
             scope: 'session';
             owner: RoomInviteProviderOwnerProps;
         };
+        /** Conversation-view equivalent for providers rendered inside the native Room tab. */
+        'agent-team-room.invite.provider.view': {
+            kind: 'list';
+            scope: 'session';
+            owner: RoomInviteProviderOwnerProps;
+        };
     }
 }
 export type RoomsHeaderActionProps = PropsRuntime<'conversation.session.header.actions'>;
 export type RoomsFooterActionProps = PropsRuntime<'sidebar.footer.action'> & SidebarFooterActionOwnerProps;
+export type RoomsViewProps = PropsRuntime<'conversation.view'>;
 interface RoomsSnapshot {
     rooms: RoomView[];
 }
@@ -68,7 +106,7 @@ export interface RoomMentionCandidate extends InputTriggerCandidate {
     readonly memberId: string;
     readonly memberName: string;
 }
-type RoomSnapshotLoader = (sessionId: string, signal?: AbortSignal) => Promise<RoomsSnapshot>;
+type RoomSnapshotLoader = (sessionId: string, signal?: AbortSignal, roomId?: string) => Promise<RoomsSnapshot>;
 type RoomMentionSender = (sessionId: string, roomId: string, memberId: string, message: string) => Promise<void>;
 /** Current, deliverable Room members projected into the native DSH @ menu. */
 export declare function roomMentionCandidates(snapshot: RoomsSnapshot, sessionId: string): RoomMentionCandidate[];
@@ -78,11 +116,11 @@ export declare function roomMentionCandidates(snapshot: RoomsSnapshot, sessionId
  * selection; Room contributes only trusted candidate data.
  */
 export declare function createRoomMentionSource(loader?: RoomSnapshotLoader, send?: RoomMentionSender): InputTriggerSource;
-export declare function roomSnapshotUrl(sessionId: string): string;
-export declare function loadRoomSnapshot(sessionId: string, signal?: AbortSignal): Promise<RoomsSnapshot>;
+export declare function roomSnapshotUrl(sessionId: string, roomId?: string): string;
+export declare function loadRoomSnapshot(sessionId: string, signal?: AbortSignal, roomId?: string): Promise<RoomsSnapshot>;
 /** Required DSH services: additive slots, native Session runtime, and native @ pipeline. */
 export declare const inject: string[];
-/** Register Room controls without replacing any DSH root, sidebar, conversation, or details surface. */
+/** Register the additive native Room view and launchers without replacing a DSH root surface. */
 export declare function apply(ctx: ClientContext): void;
 export {};
 //# sourceMappingURL=index.d.ts.map

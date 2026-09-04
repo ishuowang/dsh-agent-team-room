@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-llm'
 import { SessionId, type JsonValue } from '@deepseek-ai/dsh-session'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 import type { RoomMemberProvider } from './member-provider.js'
@@ -20,6 +21,7 @@ import {
   type RoomEventType,
   type RoomMember,
   type RoomMemberProfileRef,
+  type RoomRelayMessageSource,
   type RoomSummary,
 } from './types.js'
 
@@ -30,6 +32,13 @@ export { RoomStorage, defaultStorageFile } from './storage.js'
 declare module '@deepseek-ai/cordis' {
   interface Context {
     rooms: RoomRuntime
+  }
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Stable Room correlation retained in the destination Session log. */
+    'agent-team-room': RoomRelayMessageSource
   }
 }
 
@@ -69,6 +78,13 @@ function cleanText(value: string, field: string, maximum: number): string {
   if (text.length === 0) throw new Error(`agent-team-room: ${field} cannot be empty`)
   if (text.length > maximum) throw new Error(`agent-team-room: ${field} exceeds ${maximum} characters`)
   return text
+}
+
+function sessionMessageId(member: RoomMember, deliveryId: string): string | undefined {
+  return member.connection.providerId === DSH_SESSION_MEMBER_PROVIDER
+    && member.connection.protocol === DSH_SESSION_MEMBER_PROTOCOL
+    ? cleanText(deliveryId, 'DSH Session MessageId', 240)
+    : undefined
 }
 
 function cleanOptionalText(value: string | undefined, field: string, maximum: number): string | undefined {
@@ -335,23 +351,35 @@ export default class RoomRuntime extends Service {
       const initialMember = this.activeMember(initialRoom, targetMemberId)
       const provider = this.requiredProvider(initialMember.connection.providerId)
       const text = cleanText(message, 'message', this.config.maxMessageChars)
+      const relay = { id: randomUUID(), mode: 'direct' as const }
       const delivered = await provider.deliver({
         parent,
         room: this.copy(initialRoom),
         member: structuredClone(initialMember),
         message: text,
+        relay,
         signal,
       })
+      const deliveryId = delivered.deliveryId
       const room = this.openOwnedRoom(parent, roomId)
       const member = this.activeMember(room, targetMemberId)
+      const persistedMessageId = sessionMessageId(member, deliveryId)
       member.status = 'working'
       member.updatedAt = now()
       this.appendEvent(room, 'message.direct', `Message delivered to ${member.name}`, {
         actorMemberId: this.leader(room).memberId,
         targetMemberId: member.memberId,
+        relay: {
+          ...relay,
+          deliveries: [{
+            memberId: member.memberId,
+            status: 'accepted',
+            ...(persistedMessageId ? { sessionMessageId: persistedMessageId } : {}),
+          }],
+        },
       })
       await this.changed(room)
-      return delivered
+      return { deliveryId }
     } finally {
       this.releaseRoomOperation(roomId)
     }
@@ -363,6 +391,7 @@ export default class RoomRuntime extends Service {
       const text = cleanText(message, 'message', this.config.maxMessageChars)
       const members = initialRoom.members.filter(member => member.kind === 'member' && member.status !== 'removed')
       if (members.length === 0) throw new Error('agent-team-room: room has no active members')
+      const relay = { id: randomUUID(), mode: 'broadcast' as const }
 
       const deliveries = await Promise.all(members.map(async (member): Promise<BroadcastDelivery> => {
         try {
@@ -372,9 +401,13 @@ export default class RoomRuntime extends Service {
             room: this.copy(initialRoom),
             member: structuredClone(member),
             message: text,
+            relay,
             signal,
           })
-          return { memberId: member.memberId, deliveryId: delivered.deliveryId }
+          return {
+            memberId: member.memberId,
+            deliveryId: delivered.deliveryId,
+          }
         } catch (error) {
           return { memberId: member.memberId, error: error instanceof Error ? error.message : String(error) }
         }
@@ -382,11 +415,24 @@ export default class RoomRuntime extends Service {
       const room = this.openOwnedRoom(parent, roomId)
       for (const delivery of deliveries) {
         const member = this.activeMember(room, delivery.memberId)
-        member.status = delivery.error ? 'error' : 'working'
+        member.status = 'error' in delivery ? 'error' : 'working'
         member.updatedAt = now()
       }
-      this.appendEvent(room, 'message.broadcast', `Broadcast delivered to ${members.length} member(s)`, {
+      this.appendEvent(room, 'message.broadcast', `Broadcast attempted for ${members.length} member(s)`, {
         actorMemberId: this.leader(room).memberId,
+        relay: {
+          ...relay,
+          deliveries: deliveries.map((delivery) => {
+            if ('error' in delivery) return { memberId: delivery.memberId, status: 'failed' as const }
+            const member = this.activeMember(room, delivery.memberId)
+            const persistedMessageId = sessionMessageId(member, delivery.deliveryId)
+            return {
+              memberId: delivery.memberId,
+              status: 'accepted' as const,
+              ...(persistedMessageId ? { sessionMessageId: persistedMessageId } : {}),
+            }
+          }),
+        },
       })
       await this.changed(room)
       return structuredClone(deliveries)
@@ -508,14 +554,22 @@ export default class RoomRuntime extends Service {
           initialStatus: child.activity === 'running' ? 'working' : 'idle',
         }
       },
-      deliver: async ({ parent, member, message, signal }) => {
+      deliver: async ({ parent, room, member, message, relay, signal }) => {
         const { sessionId } = dshSessionDescriptor(member.connection.address)
         const deliveryId = await this.ctx.subagents.followup(
           parent,
           SessionId(sessionId),
           [{ type: 'text', text: message }],
           {
-            source: { kind: 'coordinator', form: 'relay', senderSessionId: parent.id },
+            source: {
+              kind: 'agent-team-room',
+              form: 'relay',
+              senderSessionId: parent.id,
+              roomId: room.id,
+              memberId: member.memberId,
+              relayId: relay.id,
+              mode: relay.mode,
+            },
             signal,
           },
         )
@@ -598,7 +652,7 @@ export default class RoomRuntime extends Service {
     room: Room,
     type: RoomEventType,
     message: string,
-    detail: Pick<RoomEvent, 'actorMemberId' | 'targetMemberId'> = {},
+    detail: Pick<RoomEvent, 'actorMemberId' | 'targetMemberId' | 'relay'> = {},
   ): void {
     const timestamp = now()
     room.events.push({ id: randomUUID(), type, at: timestamp, message, ...detail })

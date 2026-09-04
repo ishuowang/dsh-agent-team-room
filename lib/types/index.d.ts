@@ -2,13 +2,19 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { RoomMemberProvider } from './member-provider.js';
-import { type AttachDshSessionInput, type AttachRoomMemberInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomSummary } from './types.js';
+import { type AttachDshSessionInput, type AttachRoomMemberInput, type BroadcastDelivery, type Room, type RoomEvent, type RoomMember, type RoomRelayMessageSource, type RoomSummary } from './types.js';
 export * from './types.js';
 export * from './member-provider.js';
 export { RoomStorage, defaultStorageFile } from './storage.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         rooms: RoomRuntime;
+    }
+}
+declare module '@deepseek-ai/dsh-llm' {
+    interface MessageSourceMap {
+        /** Stable Room correlation retained in the destination Session log. */
+        'agent-team-room': RoomRelayMessageSource;
     }
 }
 export interface Config {

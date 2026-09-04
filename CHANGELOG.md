@@ -2,6 +2,16 @@
 
 All notable Agent Team Room changes are documented here. Releases follow Semantic Versioning.
 
+## [Unreleased]
+
+- Add an official `conversation.view` contribution that renders a complete native Room conversation workspace beside Chat without replacing the original conversation surface.
+- Merge Room-addressed messages, metadata activity, broadcasts, and correlated member replies from independent DSH Session logs into one deterministic, text-only timeline with an Everyone/member recipient composer.
+- Persist accepted/failed relay receipts and built-in DSH Session MessageIds for exact correlation while keeping prompt/reply bodies and external provider delivery ids out of `rooms.json`; broadcasts are deduplicated into one outgoing timeline row.
+- Hide assistant replies from turns that mix the current Room with any other appended Session input; exclude replacement surface copies, reasoning/tool calls, and unrelated content; and report transcripts that cannot be read instead of guessing or leaking them.
+- Project only the selected visible Room, bound message count and text size, expire read-through cache entries, and require same-origin Fetch Metadata plus a native-client marker. These headers are not authentication; remote deployments must still protect the DSH origin with authenticated TLS and user access control.
+- Reuse the existing Room selection, creation, member management, navigation, and risk-confirmation flows in both the embedded view and native launchers.
+- Add a third typed invite-provider seat for the Room view so independent integrations such as RoleHub can attach verified members there.
+
 ## [0.6.0] - 2026-08-15
 
 - Add a native, leading `@` Room-member source to DSH's input-trigger pipeline. A picked candidate binds the exact Room/member identity and sends the remaining composer text through `/room send` without prompting the leader model.

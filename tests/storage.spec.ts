@@ -99,6 +99,89 @@ describe('RoomStorage v2', () => {
     await expect(new RoomStorage(file).load()).rejects.toThrow(`cannot parse storage file ${file}`)
   })
 
+  it('persists only built-in Session correlation and rejects provider-owned delivery ids', async () => {
+    const directory = await temporaryDirectory()
+    const file = join(directory, 'rooms.json')
+    const storage = new RoomStorage(file)
+    const value = room()
+    const at = value.createdAt
+    value.members.push({
+      memberId: 'member-child',
+      kind: 'member',
+      name: 'Child',
+      connection: {
+        providerId: DSH_SESSION_MEMBER_PROVIDER,
+        protocol: DSH_SESSION_MEMBER_PROTOCOL,
+        address: { sessionId: 'child-1' },
+        sessionId: 'child-1',
+      },
+      status: 'working',
+      joinedAt: at,
+      updatedAt: at,
+    })
+    value.events.push({
+      id: 'event-delivery',
+      type: 'message.direct',
+      at,
+      targetMemberId: 'member-child',
+      relay: {
+        id: 'relay-1',
+        mode: 'direct',
+        deliveries: [{
+          memberId: 'member-child',
+          status: 'accepted',
+          sessionMessageId: 'session-message-1',
+        }],
+      },
+      message: 'Message delivered to Child',
+    })
+
+    await storage.save([value])
+    await expect(storage.load()).resolves.toEqual([value])
+
+    const invalid = structuredClone(value) as unknown as {
+      events: Array<{ relay?: { deliveries: Array<Record<string, unknown>> } }>
+    }
+    invalid.events.at(-1)!.relay!.deliveries[0]!['deliveryId'] = 'PRIVATE_PROVIDER_TOKEN'
+    await expect(storage.save([invalid as unknown as Room])).rejects.toThrow('contains a provider deliveryId')
+    expect(await storage.load()).toEqual([value])
+  })
+
+  it('rejects an accepted built-in delivery without an exact Session MessageId before writing', async () => {
+    const directory = await temporaryDirectory()
+    const storage = new RoomStorage(join(directory, 'rooms.json'))
+    const value = room()
+    const at = value.createdAt
+    value.members.push({
+      memberId: 'member-child',
+      kind: 'member',
+      name: 'Child',
+      connection: {
+        providerId: DSH_SESSION_MEMBER_PROVIDER,
+        protocol: DSH_SESSION_MEMBER_PROTOCOL,
+        address: { sessionId: 'child-1' },
+        sessionId: 'child-1',
+      },
+      status: 'working',
+      joinedAt: at,
+      updatedAt: at,
+    })
+    value.events.push({
+      id: 'event-delivery',
+      type: 'message.direct',
+      at,
+      targetMemberId: 'member-child',
+      relay: {
+        id: 'relay-1',
+        mode: 'direct',
+        deliveries: [{ memberId: 'member-child', status: 'accepted' }],
+      },
+      message: 'Message delivered to Child',
+    })
+
+    await expect(storage.save([value])).rejects.toThrow('accepted DSH delivery has no Session MessageId')
+  })
+
   it.each([
     ['a non-object root', '[]', 'is not an object'],
     ['an unsupported document schema', '{"schemaVersion":3,"rooms":[]}', 'uses an unsupported schema'],

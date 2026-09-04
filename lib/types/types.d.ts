@@ -6,6 +6,21 @@ export declare const DSH_SESSION_MEMBER_PROTOCOL: "dsh.session/v1";
 export declare const ROLEHUB_ROLE_API_VERSION: "rolehub.dev/v1alpha1";
 export type RoomStatus = 'open' | 'closed';
 export type RoomMemberStatus = 'leader' | 'working' | 'idle' | 'interrupted' | 'error' | 'removed';
+export type RoomDeliveryMode = 'direct' | 'broadcast';
+export type RoomDeliveryStatus = 'accepted' | 'failed';
+/**
+ * Durable delivery metadata. Opaque provider delivery ids are intentionally
+ * not persisted: only the built-in DSH adapter may retain its exact Session
+ * MessageId for safe read-model correlation.
+ */
+export type RoomDeliveryReceipt = {
+    memberId: string;
+    status: 'accepted';
+    sessionMessageId?: string;
+} | {
+    memberId: string;
+    status: 'failed';
+};
 export type RoomEventType = 'room.created' | 'room.closed' | 'member.joined' | 'member.left' | 'member.started' | 'member.settled' | 'message.direct' | 'message.broadcast' | 'system.recovered' | 'system.migrated';
 /**
  * Provider-neutral profile reference carried with a member. Room stores provenance but
@@ -49,7 +64,23 @@ export interface RoomEvent {
     at: string;
     actorMemberId?: string;
     targetMemberId?: string;
+    /** Correlation only. Message contents remain in the destination transport. */
+    relay?: {
+        id: string;
+        mode: RoomDeliveryMode;
+        deliveries: RoomDeliveryReceipt[];
+    };
     message: string;
+}
+/** Durable source attribution written into a DSH member Session for one Room relay. */
+export interface RoomRelayMessageSource {
+    kind: 'agent-team-room';
+    form: 'relay';
+    senderSessionId: string;
+    roomId: string;
+    memberId: string;
+    relayId: string;
+    mode: RoomDeliveryMode;
 }
 export interface Room {
     schemaVersion: typeof ROOM_SCHEMA_VERSION;
@@ -107,10 +138,14 @@ export interface RoomMemberAttachment {
     /** Provider-owned compensation when Room cannot commit the prepared member. */
     rollback?: () => Promise<void>;
 }
-export interface BroadcastDelivery {
+export type BroadcastDelivery = {
     memberId: string;
-    deliveryId?: string;
-    error?: string;
-}
+    deliveryId: string;
+    error?: never;
+} | {
+    memberId: string;
+    error: string;
+    deliveryId?: never;
+};
 export declare function roomSummary(room: Room): RoomSummary;
 //# sourceMappingURL=types.d.ts.map
